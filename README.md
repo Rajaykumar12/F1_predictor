@@ -1,5 +1,17 @@
 # Enterprise-Level F1 Race Prediction System
 
+## Overview
+This project is an enterprise-level F1 race prediction system designed to provide accurate predictions for race winners, lap times, and full race positions. Built using FastAPI and XGBoost, the system leverages robust feature engineering, data cleaning, and model evaluation techniques to ensure high-quality predictions. The system is modular, scalable, and ready for deployment in production environments.
+
+## Key Features
+
+- **FastAPI Integration**: Provides multiple prediction endpoints for race winner, lap time, and full race positions.
+- **Robust Feature Engineering**: Includes rolling windows, DNF counts, podiums, tire degradation metrics, categorical encodings, and performance metrics.
+- **Comprehensive Data Cleaning**: Handles outlier removal using IQR, missing value imputation, and normalization.
+- **Advanced Model Architecture**: Utilizes XGBoost for classification, regression, and multi-target regression tasks.
+- **Detailed Documentation**: Includes technical details, feature engineering, data cleaning, visualization, and model architecture.
+- **Deployment Ready**: Supports Docker, AWS, and Azure deployment.
+
 ## Directory Structure
 ```
 F1/
@@ -35,6 +47,7 @@ F1/
 ## Table of Contents
 - [Overview](#overview)
 - [Key Features](#key-features)
+- [Directory Structure](#directory-structure)
 - [Data Collection](#data-collection)
 - [Data Cleaning](#data-cleaning)
 - [Feature Engineering](#feature-engineering)
@@ -51,18 +64,6 @@ F1/
 - [Future Work](#future-work)
 - [License](#license)
 
-
-## Overview
-This project is an enterprise-level F1 race prediction system designed to provide accurate predictions for race winners, lap times, and full race positions. Built using FastAPI and XGBoost, the system leverages robust feature engineering, data cleaning, and model evaluation techniques to ensure high-quality predictions. The system is modular, scalable, and ready for deployment in production environments.
-
-## Key Features
-
-- **FastAPI Integration**: Provides multiple prediction endpoints for race winner, lap time, and full race positions.
-- **Robust Feature Engineering**: Includes rolling windows, DNF counts, podiums, tire degradation metrics, categorical encodings, and performance metrics.
-- **Comprehensive Data Cleaning**: Handles outlier removal using IQR, missing value imputation, and normalization.
-- **Advanced Model Architecture**: Utilizes XGBoost for classification, regression, and multi-target regression tasks.
-- **Detailed Documentation**: Includes technical details, feature engineering, data cleaning, visualization, and model architecture.
-- **Deployment Ready**: Supports Docker, AWS, and Azure deployment.
 
 ## Data Collection
 
