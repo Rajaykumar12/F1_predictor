@@ -50,7 +50,6 @@ F1/
 - [Directory Structure](#directory-structure)
 - [Data Collection](#data-collection)
 - [Data Cleaning](#data-cleaning)
-- [Feature Engineering](#feature-engineering)
 - [Feature Engineering and EDA](#feature-engineering-and-eda)
 - [Models](#models)
 - [Notebooks](#notebooks)
@@ -93,16 +92,6 @@ The `data_cleaning.py` script is responsible for preparing the collected F1 race
 2. Save the cleaned data into CSV files for use in feature engineering and modeling.
 
 The cleaned data is essential for building accurate and reliable prediction models, ensuring the integrity of the feature engineering and modeling processes.
-
-## Feature Engineering
-
-Feature engineering is a critical component of this project. The following techniques were implemented:
-- **Rolling Windows**: Calculated rolling averages for lap times and race positions to capture trends.
-- **DNF Counts**: Counted the number of "Did Not Finish" events for drivers to assess reliability.
-- **Podium Metrics**: Encoded podium finishes to evaluate driver performance.
-- **Tire Degradation**: Modeled tire wear and its impact on lap times.
-- **Categorical Encodings**: Converted categorical data (e.g., driver names, teams) into numerical formats using one-hot encoding and label encoding.
-- **Performance Metrics**: Included metrics such as average lap time, fastest lap, and consistency scores.
 
 ## Feature Engineering and EDA
 
