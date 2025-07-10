@@ -48,7 +48,8 @@ F1/
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Directory Structure](#directory-structure)
-- [Running locally](#How-to-Run-Locally)
+- [Running Locally](#How-to-Run-Locally)
+- [Example Input](#Example-Inputs-and-Possible-Values)
 - [Data Collection](#data-collection)
 - [Data Cleaning](#data-cleaning)
 - [Feature Engineering and EDA](#feature-engineering-and-eda)
@@ -106,6 +107,28 @@ To run the project on your local machine after cloning it, follow these steps:
 This will ensure the project is set up and running locally for development and testing purposes.
 
 For more details, refer to the individual notebooks and scripts included in the project.
+
+
+## Example Inputs and Possible Values
+
+### Predict Endpoint
+#### Input Fields:
+- **Team**: Possible values include `Red Bull Racing`, `Mercedes`, `Ferrari`, `McLaren`, `Alpine`, `AlphaTauri`, `Aston Martin`, `Williams`, `Haas`, `Alfa Romeo`.
+- **Position**: Integer values ranging from `1` to `20`.
+- **GridPosition**: Integer values ranging from `1` to `20`.
+- **driver_win_rate**: Float values, e.g., `0.75`.
+- **team_reliability**: Float values, e.g., `0.95`.
+
+### Lap Time Endpoint
+#### Input Fields:
+- **Driver**: Possible values include `Max Verstappen`, `Lewis Hamilton`, `Charles Leclerc`, `Sergio Perez`, `Lando Norris`, `Fernando Alonso`, `Pierre Gasly`, `Sebastian Vettel`, `George Russell`, `Valtteri Bottas`.
+- **Team**: Same as the `Team` field in the Predict Endpoint.
+- **Position**: Integer values ranging from `1` to `20`.
+- **TireCompound**: Possible values include `Soft`, `Medium`, `Hard`, `Intermediate`, `Wet`.
+- **TireAge**: Integer values, e.g., `10`.
+- **driver_win_rate**: Float values, e.g., `0.75`.
+- **team_reliability**: Float values, e.g., `0.95`.
+
 
 ## Data Collection
 
@@ -326,5 +349,4 @@ Potential enhancements include:
 ## License
 
 This project is licensed under the MIT License.
-
 
