@@ -50,22 +50,12 @@ F1/
 - [Requirements](#requirements)
 - [Future Work](#future-work)
 - [License](#license)
-- [Acknowledgments](#acknowledgments)
 
-## Visual Enhancements
-![F1 Animation](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
-![F1 Cars](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
-![F1 Track](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
-
-To make the README visually appealing, animations and images related to Formula 1 have been added. The above animations showcase the thrill of F1 racing, the speed of F1 cars, and the excitement of F1 tracks.
 
 ## Overview
-![Overview Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
-
 This project is an enterprise-level F1 race prediction system designed to provide accurate predictions for race winners, lap times, and full race positions. Built using FastAPI and XGBoost, the system leverages robust feature engineering, data cleaning, and model evaluation techniques to ensure high-quality predictions. The system is modular, scalable, and ready for deployment in production environments.
 
 ## Key Features
-![Key Features Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 - **FastAPI Integration**: Provides multiple prediction endpoints for race winner, lap time, and full race positions.
 - **Robust Feature Engineering**: Includes rolling windows, DNF counts, podiums, tire degradation metrics, categorical encodings, and performance metrics.
@@ -75,7 +65,6 @@ This project is an enterprise-level F1 race prediction system designed to provid
 - **Deployment Ready**: Supports Docker, AWS, and Azure deployment.
 
 ## Data Collection
-![Data Collection Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
 
 The `data_collection.py` script is responsible for collecting and saving F1 race data. Key functionalities include:
 
@@ -85,7 +74,6 @@ The `data_collection.py` script is responsible for collecting and saving F1 race
 - **Caching**: Utilizes FastF1's caching mechanism to speed up data retrieval
 
 ## Data Cleaning
-![Data Cleaning Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 The `data_cleaning.py` script is responsible for preparing the collected F1 race data for analysis and modeling. Key functionalities include:
 
@@ -106,7 +94,6 @@ The `data_cleaning.py` script is responsible for preparing the collected F1 race
 The cleaned data is essential for building accurate and reliable prediction models, ensuring the integrity of the feature engineering and modeling processes.
 
 ## Feature Engineering
-![Feature Engineering Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
 
 Feature engineering is a critical component of this project. The following techniques were implemented:
 - **Rolling Windows**: Calculated rolling averages for lap times and race positions to capture trends.
@@ -117,7 +104,6 @@ Feature engineering is a critical component of this project. The following techn
 - **Performance Metrics**: Included metrics such as average lap time, fastest lap, and consistency scores.
 
 ## Feature Engineering and EDA
-![EDA Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 The `feature_and_eda.ipynb` notebook is dedicated to feature engineering and exploratory data analysis (EDA) for the F1 race prediction system. Key functionalities include:
 
@@ -139,7 +125,6 @@ The `feature_and_eda.ipynb` notebook is dedicated to feature engineering and exp
 The insights and features developed in this notebook are crucial for building accurate models and understanding the dynamics of F1 races.
 
 ## Models
-![Models Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
 
 The project includes multiple XGBoost models tailored for specific prediction tasks:
 - **Race Winner Prediction**: A classification model trained to predict the race winner based on historical data and engineered features.
@@ -147,7 +132,6 @@ The project includes multiple XGBoost models tailored for specific prediction ta
 - **Full Race Position Prediction**: A multi-target regression model that predicts the positions of all drivers at the end of the race.
 
 ## Notebooks
-![Notebooks Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 The following Jupyter notebooks were created to support the development and evaluation of the models:
 - **Feature Engineering and EDA**: Contains detailed feature engineering and exploratory data analysis.
@@ -156,7 +140,6 @@ The following Jupyter notebooks were created to support the development and eval
 - **Next Race Prediction**: Predicts full race positions for upcoming races.
 
 ## Race Winner Model
-![Race Winner Model Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
 
 The `race_winner_model.ipynb` notebook focuses on predicting the race winner using advanced machine learning techniques. Key functionalities include:
 
@@ -179,7 +162,6 @@ The `race_winner_model.ipynb` notebook focuses on predicting the race winner usi
 This notebook is essential for building a robust race winner prediction system, leveraging advanced machine learning techniques and feature engineering.
 
 ## Lap Time Model
-![Lap Time Model Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 The `lap_time_model.ipynb` notebook is dedicated to predicting lap times using advanced regression techniques. Key functionalities include:
 
@@ -200,7 +182,6 @@ The `lap_time_model.ipynb` notebook is dedicated to predicting lap times using a
 This notebook is essential for building a reliable lap time prediction system, leveraging advanced regression techniques and feature engineering.
 
 ## Next Race Prediction
-![Next Race Prediction Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
 
 The `next_race_predict.ipynb` notebook is designed to predict full race positions for upcoming races using historical data and advanced regression techniques. Key functionalities include:
 
@@ -221,7 +202,6 @@ The `next_race_predict.ipynb` notebook is designed to predict full race position
 This notebook is essential for building a reliable race position prediction system, leveraging advanced regression techniques and feature engineering.
 
 ## FastAPI Application
-![FastAPI Application Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 The `app.py` script serves as the backend API for the F1 race prediction system, built using FastAPI. It provides multiple endpoints for race winner prediction, lap time prediction, and full race position prediction.
 
@@ -248,7 +228,6 @@ The `app.py` script serves as the backend API for the F1 race prediction system,
 This script is essential for deploying the F1 race prediction system, providing a user-friendly interface for accessing prediction models.
 
 ## Pipeline Orchestration
-![Pipeline Orchestration Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
 
 The `python_script.py` script is responsible for orchestrating the execution of all components in the F1 race prediction system. It ensures that data collection, cleaning, feature engineering, model training, and API setup are performed sequentially.
 
@@ -271,12 +250,10 @@ The `python_script.py` script is responsible for orchestrating the execution of 
 This script is essential for automating the workflow of the F1 race prediction system, ensuring all components are executed in the correct order.
 
 ## Deployment
-![Deployment Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 The system is ready for deployment using Docker, AWS, or Azure. Detailed deployment instructions are provided in the documentation.
 
 ## Requirements
-![Requirements Icon](https://media.giphy.com/media/3o7TKP9lnlQyk8Xh6k/giphy.gif)
 
 The project dependencies are listed in `requirements.txt`. Key libraries include:
 - FastAPI
@@ -307,7 +284,6 @@ The project dependencies are listed in `requirements.txt`. Key libraries include
 The collected data serves as the foundation for feature engineering and model training, enabling accurate predictions for race winners, lap times, and full race positions.
 
 ## Future Work
-![Future Work Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 Potential enhancements include:
 - Integration of real-time data (e.g., weather conditions).
@@ -315,17 +291,9 @@ Potential enhancements include:
 - Additional feature engineering techniques.
 
 ## License
-![License Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
 This project is licensed under the MIT License.
 
-## Acknowledgments
-![Acknowledgments Icon](https://media.giphy.com/media/26AHONQ79FdWZhAI0/giphy.gif)
 
-- **FastF1**: For providing race data.
-- **XGBoost**: For powerful machine learning algorithms.
-- **FastAPI**: For building the backend API.
-
----
 
 For more details, refer to the individual notebooks and scripts included in the project.
