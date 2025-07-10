@@ -48,7 +48,7 @@ F1/
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Directory Structure](#directory-structure)
-- [Running locally](#How to Run Locally)
+- [Running locally](#How-to-Run-Locally)
 - [Data Collection](#data-collection)
 - [Data Cleaning](#data-cleaning)
 - [Feature Engineering and EDA](#feature-engineering-and-eda)
