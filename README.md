@@ -48,6 +48,7 @@ F1/
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Directory Structure](#directory-structure)
+- [Running locally](## How to Run Locally)
 - [Data Collection](#data-collection)
 - [Data Cleaning](#data-cleaning)
 - [Feature Engineering](#feature-engineering)
@@ -64,6 +65,48 @@ F1/
 - [Future Work](#future-work)
 - [License](#license)
 
+
+## How to Run Locally
+
+To run the project on your local machine after cloning it, follow these steps:
+
+1. **Clone the Repository**:
+   ```bash
+   git clone <repository-url>
+   cd F1
+   ```
+
+2. **Install Dependencies**:
+   Ensure you have Python installed. Then, install the required dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Start the FastAPI Application**:
+   Run the FastAPI application using Uvicorn:
+   ```bash
+   uvicorn app:app --reload
+   ```
+
+4. **Access the API Endpoints**:
+   Open your browser or use a tool like Postman to access the following endpoints:
+   - `/predict`: Predicts race winners.
+   - `/predict_laptime`: Predicts lap times.
+   - `/predict_next_race`: Predicts full race positions.
+   - `/health`: Checks the health of the API.
+
+5. **Explore the Notebooks**:
+   Open the Jupyter notebooks in the `notebooks/` directory to explore feature engineering, model training, and predictions.
+
+6. **Run the Pipeline**:
+   Execute the `python_script.py` to orchestrate the entire pipeline:
+   ```bash
+   python python_script.py
+   ```
+
+This will ensure the project is set up and running locally for development and testing purposes.
+
+For more details, refer to the individual notebooks and scripts included in the project.
 
 ## Data Collection
 
@@ -296,5 +339,3 @@ Potential enhancements include:
 This project is licensed under the MIT License.
 
 
-
-For more details, refer to the individual notebooks and scripts included in the project.
