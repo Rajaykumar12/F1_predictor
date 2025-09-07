@@ -46,17 +46,19 @@ with open('models/xgb_laptime_pipeline.pk1', 'rb') as f:
     laptime_pipeline = pickle.load(f)
 
 class LapTimeInput(BaseModel):
-    Driver: str
-    Team: str
-    Position: int
-    TireCompound: str
-    TireAge: int
+    Race: int
+    Driver: object
+    Team: object
+    Position: float
+    TireCompound: float
+    TireAge: float
     driver_win_rate: float
     team_reliability: float
 
+
 @app.post("/predict_laptime")
 def predict_laptime(lap: LapTimeInput):
-    features = ['Driver', 'Team', 'Position', 'TireCompound', 
+    features = ['Race', 'Driver', 'Team', 'Position', 'TireCompound', 
                 'TireAge', 'driver_win_rate', 'team_reliability']
     
     df = pd.DataFrame([lap.dict()])[features]
@@ -72,7 +74,7 @@ def predict_laptime(lap: LapTimeInput):
 with open('models/race_prediction_pipeline.pk1', 'rb') as f:
     race_model = pickle.load(f)
 
-def create_historical_features(df, n_previous=5):
+def create_historical_features(df, n_previous=6):
     features = []
     
     for driver in df['Driver'].unique():
