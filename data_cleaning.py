@@ -47,6 +47,7 @@ upper_bound = Q3 + 1.5 * IQR
 print(f"\n=== OUTLIER BOUNDS ===")
 print(f"Lower bound: {lower_bound:.2f} seconds")
 print(f"Upper bound: {upper_bound:.2f} seconds")
+
 #Find outliers
 outliers = lap_times[(lap_times < lower_bound) | (lap_times > upper_bound)]
 print(f"\nOutliers found: {len(outliers)} out of {len(lap_times)} lap times")
