@@ -141,7 +141,6 @@ def save_data(lap_data, result_data, qualifying_data):
     return laps_df, results_df, qualifying_df
 
 
-
 if __name__ == "__main__":
     print("F1 Data Collection with Qualifying")
     print("===================================")
