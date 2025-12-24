@@ -1,4 +1,5 @@
 Year,Race,Driver,Team,Position,GridPosition,Points,Status
+<<<<<<< HEAD
 2025,16,M VERSTAPPEN,Red Bull Racing,1.0,1.0,25.0,Finished
 2025,16,L NORRIS,McLaren,2.0,2.0,18.0,Finished
 2025,16,O PIASTRI,McLaren,3.0,3.0,15.0,Finished
@@ -179,3 +180,45 @@ Year,Race,Driver,Team,Position,GridPosition,Points,Status
 2025,24,L LAWSON,Racing Bulls,18.0,13.0,0.0,Lapped
 2025,24,P GASLY,Alpine,19.0,19.0,0.0,Lapped
 2025,24,F COLAPINTO,Alpine,20.0,20.0,0.0,Lapped
+=======
+2025,14,L NORRIS,McLaren,1.0,3.0,25.0,Finished
+2025,14,O PIASTRI,McLaren,2.0,2.0,18.0,Finished
+2025,14,G RUSSELL,Mercedes,3.0,4.0,15.0,Finished
+2025,14,C LECLERC,Ferrari,4.0,1.0,12.0,Finished
+2025,14,F ALONSO,Aston Martin,5.0,5.0,10.0,Finished
+2025,14,G BORTOLETO,Kick Sauber,6.0,7.0,8.0,Finished
+2025,14,L STROLL,Aston Martin,7.0,6.0,6.0,Finished
+2025,14,L LAWSON,Racing Bulls,8.0,9.0,4.0,Finished
+2025,14,M VERSTAPPEN,Red Bull Racing,9.0,8.0,2.0,Finished
+2025,14,K ANTONELLI,Mercedes,10.0,15.0,1.0,Lapped
+2025,14,I HADJAR,Racing Bulls,11.0,10.0,0.0,Lapped
+2025,14,L HAMILTON,Ferrari,12.0,12.0,0.0,Lapped
+2025,14,N HULKENBERG,Kick Sauber,13.0,18.0,0.0,Lapped
+2025,14,C SAINZ,Williams,14.0,13.0,0.0,Lapped
+2025,14,A ALBON,Williams,15.0,19.0,0.0,Lapped
+2025,14,E OCON,Haas F1 Team,16.0,17.0,0.0,Lapped
+2025,14,Y TSUNODA,Red Bull Racing,17.0,20.0,0.0,Lapped
+2025,14,F COLAPINTO,Alpine,18.0,14.0,0.0,Lapped
+2025,14,P GASLY,Alpine,19.0,16.0,0.0,Lapped
+2025,14,O BEARMAN,Haas F1 Team,20.0,11.0,0.0,Retired
+2025,15,O PIASTRI,McLaren,1.0,1.0,25.0,Finished
+2025,15,M VERSTAPPEN,Red Bull Racing,2.0,3.0,18.0,Finished
+2025,15,I HADJAR,Racing Bulls,3.0,4.0,15.0,Finished
+2025,15,G RUSSELL,Mercedes,4.0,5.0,12.0,Finished
+2025,15,A ALBON,Williams,5.0,15.0,10.0,Finished
+2025,15,O BEARMAN,Haas F1 Team,6.0,20.0,8.0,Finished
+2025,15,L STROLL,Aston Martin,7.0,19.0,6.0,Finished
+2025,15,F ALONSO,Aston Martin,8.0,10.0,4.0,Finished
+2025,15,Y TSUNODA,Red Bull Racing,9.0,12.0,2.0,Finished
+2025,15,E OCON,Haas F1 Team,10.0,18.0,1.0,Finished
+2025,15,F COLAPINTO,Alpine,11.0,16.0,0.0,Finished
+2025,15,L LAWSON,Racing Bulls,12.0,8.0,0.0,Finished
+2025,15,C SAINZ,Williams,13.0,9.0,0.0,Finished
+2025,15,N HULKENBERG,Kick Sauber,14.0,17.0,0.0,Finished
+2025,15,G BORTOLETO,Kick Sauber,15.0,13.0,0.0,Finished
+2025,15,K ANTONELLI,Mercedes,16.0,11.0,0.0,Finished
+2025,15,P GASLY,Alpine,17.0,14.0,0.0,Finished
+2025,15,L NORRIS,McLaren,18.0,2.0,0.0,Retired
+2025,15,C LECLERC,Ferrari,19.0,6.0,0.0,Retired
+2025,15,L HAMILTON,Ferrari,20.0,7.0,0.0,Retired
+>>>>>>> 7956b82a855e7efd750940770f0b385eeed57583

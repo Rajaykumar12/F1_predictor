@@ -1,6 +1,9 @@
 fastf1_cache/
 *.tmp
 *.log
+data/
+models/
+
 
 # Compiled Python files
 __pycache__/
