@@ -116,7 +116,6 @@ class LapTimeInput(BaseModel):
     IsInlap: Optional[int] = 0
     OldTiresIndicator: Optional[int] = 0
 
-
 @app.post("/predict_laptime")
 def predict_laptime(lap: LapTimeInput):
     """Predict lap time with 30+ features (auto-computes if missing)"""
