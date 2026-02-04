@@ -1,8 +1,8 @@
-# 🏎️ F1 Race Prediction System
+# F1 Race Prediction System
 
 A comprehensive machine learning system for predicting Formula 1 race outcomes using FastAPI, XGBoost, and the FastF1 API. The system analyzes historical race data, qualifying performance, and driver/team form to generate accurate predictions.
 
-## 📋 Overview
+## Overview
 
 This project provides:
 - **Race Winner Prediction**: Predict which driver will win the race
@@ -12,7 +12,7 @@ This project provides:
 - **Qualifying Analysis**: Incorporates qualifying times and grid positions
 - **Historical Features**: Uses configurable lookback periods (3-12 races) to analyze recent form
 
-## 🚀 Features
+## Features
 
 ### Prediction Models
 - **XGBoost Race Winner Model**: Binary classification (100% accuracy on test data)
@@ -20,14 +20,14 @@ This project provides:
 - **Race Position Model**: Multi-class position prediction with 15+ features
 
 ### Key Capabilities
-- ✅ Configurable lookback period (default: 6 races, optimal: 5-8)
-- ✅ Qualifying feature integration (best time, gap to pole, qualifying performance)
-- ✅ Real-time predictions via REST API
-- ✅ Historical trend analysis (form trends, reliability, success rates)
-- ✅ 2025 season data for latest predictions
-- ✅ Comprehensive EDA with qualifying visualizations
+- Configurable lookback period (default: 6 races, optimal: 5-8)
+- Qualifying feature integration (best time, gap to pole, qualifying performance)
+- Real-time predictions via REST API
+- Historical trend analysis (form trends, reliability, success rates)
+- 2025 season data for latest predictions
+- Comprehensive EDA with qualifying visualizations
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 F1/
@@ -55,7 +55,7 @@ F1/
 └── fastf1_cache/              # Cached FastF1 API data
 ```
 
-## 🛠️ Installation
+## Installation
 
 ### Prerequisites
 - Python 3.8+
@@ -88,7 +88,7 @@ fastf1
 requests-cache
 ```
 
-## 📊 Data Pipeline
+## Data Pipeline
 
 ### 1. Data Collection
 Collects race, lap, and qualifying data from FastF1 API (2025 season):
@@ -122,7 +122,7 @@ Open and run the Jupyter notebooks in order:
 3. **`lap_time_model.ipynb`** - Train lap time regressor
 4. **`next_race_predict.ipynb`** - Train race position predictor
 
-## 🌐 API Usage
+## API Usage
 
 ### Start the Server
 
@@ -238,7 +238,7 @@ GET http://127.0.0.1:8000/predict_next_race?lookback_races=6
 }
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### Lookback Period
 Adjust the number of previous races used for prediction in `app.py`:
@@ -252,7 +252,7 @@ MAX_LOOKBACK = 12
 ### Data Filtering
 The API automatically filters for **2025 season data only** when making predictions, ensuring forecasts are based on current season performance.
 
-## 📈 Model Features
+## Model Features
 
 ### Historical Features (15+)
 1. `avg_position_last` - Average finishing position over last N races
@@ -273,7 +273,7 @@ The API automatically filters for **2025 season data only** when making predicti
 - **GapToPole**: Time difference from pole position
 - **QualifyingPerformance**: Normalized performance score
 
-## 📊 Performance
+## Performance
 
 ### Model Accuracy
 - **Race Winner Model**: 100% accuracy (Random Forest/Gradient Boosting)
@@ -286,7 +286,7 @@ The API automatically filters for **2025 season data only** when making predicti
 - Front row (P1-P2) win rate: ~60%
 - Top 3 quali positions lead to ~70% podium rate
 
-## 🔬 Exploratory Data Analysis
+## Exploratory Data Analysis
 
 The `feature_and_eda.ipynb` notebook includes:
 
@@ -307,7 +307,7 @@ The `feature_and_eda.ipynb` notebook includes:
 - Heatmap of all feature relationships
 - Qualifying metric impact on race outcomes
 
-## 🧪 Development
+## Development
 
 ### Running in Development Mode
 ```bash
@@ -321,13 +321,13 @@ uvicorn app:app --reload --host 127.0.0.1 --port 8000
 3. Retrain models in Jupyter notebooks
 4. Update API response models if needed
 
-## 📝 Data Sources
+## Data Sources
 
 - **FastF1 API**: Official F1 timing data
 - **Seasons**: 2025 (24 races - complete season through Abu Dhabi)
 - **Cache**: `fastf1_cache/` directory for faster subsequent loads
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
@@ -335,18 +335,18 @@ uvicorn app:app --reload --host 127.0.0.1 --port 8000
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - [FastF1](https://github.com/theOehrly/Fast-F1) - F1 timing data API
 - [FastAPI](https://fastapi.tiangolo.com/) - Modern web framework
 - [XGBoost](https://xgboost.readthedocs.io/) - Gradient boosting library
 - Formula 1 - For the amazing sport
 
-## 📧 Contact
+## Contact
 
 For questions or support, please open an issue in the repository.
 
