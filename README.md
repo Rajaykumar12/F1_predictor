@@ -1,355 +1,379 @@
 # F1 Race Prediction System
 
-A comprehensive machine learning system for predicting Formula 1 race outcomes using FastAPI, XGBoost, and the FastF1 API. The system analyzes historical race data, qualifying performance, and driver/team form to generate accurate predictions.
-
-## Overview
-
-This project provides:
-- **Race Winner Prediction**: Predict which driver will win the race
-- **Lap Time Prediction**: Estimate lap times based on driver, tire age, and compound
-- **Race Position Prediction**: Predict finishing positions for all drivers
-- **REST API**: FastAPI-powered endpoints for real-time predictions
-- **Qualifying Analysis**: Incorporates qualifying times and grid positions
-- **Historical Features**: Uses configurable lookback periods (3-12 races) to analyze recent form
-
-## Features
-
-### Prediction Models
-- **XGBoost Race Winner Model**: Binary classification (100% accuracy on test data)
-- **XGBoost Lap Time Model**: Regression model for lap time predictions
-- **Race Position Model**: Multi-class position prediction with 15+ features
-
-### Key Capabilities
-- Configurable lookback period (default: 6 races, optimal: 5-8)
-- Qualifying feature integration (best time, gap to pole, qualifying performance)
-- Real-time predictions via REST API
-- Historical trend analysis (form trends, reliability, success rates)
-- 2025 season data for latest predictions
-- Comprehensive EDA with qualifying visualizations
+A machine learning system for predicting Formula 1 race outcomes. Uses XGBoost models trained on FastF1 telemetry data, served through a FastAPI REST API. The entire workflow — data fetching through race-day prediction — runs from a single CLI.
 
 ## Project Structure
 
 ```
-F1/
-├── app.py                      # FastAPI server with prediction endpoints
-├── data_collection.py          # Collects race, lap, and qualifying data from FastF1
-├── data_cleaning.py            # Cleans and processes data with qualifying features
-├── requirements.txt            # Python dependencies
-├── LICENSE                     # MIT License
-├── data/                       # CSV data files
+F1_predictor/
+├── main.py                     # CLI entry point (run everything from here)
+├── app.py                      # FastAPI prediction server
+├── config.yaml                 # Central config: paths, season, constants, hyperparameters
+├── requirements.txt            # Production dependencies
+├── requirements-dev.txt        # Dev/test dependencies (jupyter, pytest, etc.)
+├── Dockerfile                  # Container image for production deployment
+├── docker-compose.yml          # Docker Compose service definition
+│
+├── pipeline/
+│   ├── config_loader.py        # Typed config dataclasses + validation + get_config()
+│   ├── fetch.py                # FastF1 API → raw CSVs + upcoming qualifying fetch
+│   ├── clean.py                # Raw CSVs → cleaned CSVs + data health plots
+│   ├── features.py             # Cleaned CSVs → feature CSVs + insight plots
+│   ├── train.py                # Feature CSVs → trained model pipelines + metrics.json
+│   ├── evaluate.py             # Predicted vs actual lap time comparison
+│   └── visualize.py            # Headless matplotlib/seaborn plot generation
+│
+├── tests/
+│   ├── test_api.py             # FastAPI endpoint tests (validation, 503, health)
+│   ├── test_pipeline.py        # Unit tests for clean.py and features.py
+│   └── test_config.py          # Config loading, validation, and defaults
+│
+├── data/                       # Generated CSV artifacts (git-ignored)
 │   ├── f1_laps_simple.csv
 │   ├── f1_results_simple.csv
 │   ├── f1_qualifying_simple.csv
 │   ├── f1_laps_cleaned.csv
 │   ├── f1_results_cleaned.csv
-│   └── ...
-├── models/                     # Trained ML models
-│   ├── xgb_racewin_pipeline.pk1
-│   ├── xgb_laptime_pipeline.pk1
-│   └── race_position_prediction_pipeline.pk1
-├── notebooks/                  # Jupyter notebooks for training & analysis
-│   ├── feature_and_eda.ipynb
-│   ├── race_winner_model.ipynb
-│   ├── lap_time_model.ipynb
-│   └── next_race_predict.ipynb
-└── fastf1_cache/              # Cached FastF1 API data
+│   ├── f1_qualifying_cleaned.csv
+│   ├── f1_laps_features.csv
+│   ├── f1_results_features.csv
+│   └── upcoming_qualifying.csv     # Real qualifying result for the next race
+│
+├── models/                     # Trained sklearn pipelines (git-ignored)
+│   ├── xgb_racewin_pipeline.pkl
+│   ├── xgb_laptime_pipeline.pkl
+│   ├── xgb_laptime_features.pkl    # Feature list used at train time (for predict)
+│   ├── race_prediction_pipeline.pkl
+│   ├── race_position_feature_info.pkl
+│   └── metrics.json                # CV scores and holdout metrics for all models
+│
+├── outputs/plots/              # Auto-generated visualizations (git-ignored)
+│   ├── cleaning/               # Data health plots after clean stage
+│   ├── features/               # Feature insight plots after features stage
+│   └── evaluation/             # Predicted vs actual plots after evaluate
+│
+└── fastf1_cache/               # FastF1 API cache (git-ignored)
 ```
 
-## Installation
+## Setup
 
-### Prerequisites
-- Python 3.8+
-- pip
+**Requirements:** Python 3.10+
 
-### Setup
-
-1. **Clone the repository**
 ```bash
 git clone <repository-url>
-cd F1
-```
+cd F1_predictor
 
-2. **Install dependencies**
-```bash
+# Production
 pip install -r requirements.txt
+
+# Development (includes jupyter, pytest, matplotlib)
+pip install -r requirements-dev.txt
 ```
 
-### Required Packages
+## Race Weekend Routine
+
+This is the week-to-week workflow once the system is set up.
+
+**Saturday — after qualifying:**
+```bash
+python main.py fetch-qualifying
 ```
-fastapi
-uvicorn
-pandas
-numpy
-scikit-learn
-xgboost
-matplotlib
-seaborn
-fastf1
-requests-cache
+Fetches real grid positions from today's qualifying session and saves them to `data/upcoming_qualifying.csv`. The prediction endpoint and CLI command automatically use these instead of historical averages.
+
+**Sunday — before the race:**
+```bash
+# Terminal output (no server needed)
+python main.py predict
+
+# Or via the API
+python main.py serve
+curl -s http://localhost:8000/predict_next_race | python -m json.tool
 ```
 
-## Data Pipeline
+**Sunday — after the race:**
+```bash
+python main.py run-all
+```
+Ingests the completed race, retrains all models on the updated season data, and attempts to fetch qualifying for the next race weekend. By Monday the system is ready for the following round.
 
-### 1. Data Collection
-Collects race, lap, and qualifying data from FastF1 API (2025 season):
+## All CLI Commands
 
 ```bash
-python data_collection.py
+# Full pipeline (fetch → clean → features → train → fetch-qualifying)
+python main.py run-all
+
+# Individual pipeline stages
+python main.py fetch                         # Pull completed race data from FastF1
+python main.py clean                         # Clean raw CSVs + save data health plots
+python main.py features                      # Engineer features + save insight plots
+python main.py train                         # Train all three models
+python main.py train --model laptime         # Train a specific model only
+python main.py train --model racewin
+python main.py train --model position
+
+# Qualifying and prediction
+python main.py fetch-qualifying              # Fetch qualifying for the next race (auto-detects round)
+python main.py fetch-qualifying --race 8     # Fetch qualifying for a specific round
+python main.py predict                       # Print predicted race finishing order to terminal
+python main.py predict --lookback 8         # Use a custom form window (default: config value)
+
+# Evaluation
+python main.py evaluate-laptime              # Compare predicted vs actual (most recent race)
+python main.py evaluate-laptime --race 3     # Evaluate a specific round
+
+# Serve the prediction API
+python main.py serve
+python main.py serve --port 8080 --reload    # Dev mode with auto-reload
 ```
 
-**Output:**
-- `f1_laps_simple.csv` - Lap-by-lap data
-- `f1_results_simple.csv` - Race results
-- `f1_qualifying_simple.csv` - Qualifying times (Q1, Q2, Q3)
+## How Predictions Work
 
-### 2. Data Cleaning
-Processes raw data, handles missing values, and creates qualifying features:
+### `predict` CLI and `GET /predict_next_race`
 
-```bash
-python data_cleaning.py
+Builds a per-driver feature set from their last N completed races — rolling averages of finishing position, wins, podiums, DNF rate, qualifying performance, and form trend — and feeds it into the race position model (XGBoost regressor).
+
+**Without qualifying data** — uses each driver's historical average grid position. Useful as a form guide but not race-specific.
+
+**With qualifying data** (after `fetch-qualifying`) — overrides grid position, gap to pole, and qualifying performance with the real values from this weekend's session. This is what makes it a genuine race-day prediction.
+
+The `next_race` field in the API response shows which mode was active:
+```
+"Australian Grand Prix — real qualifying, last 6 races form"
+"Next Grand Prix — historical grid positions, last 6 races form"
 ```
 
-**Features Created:**
-- `BestQualifyingTime` - Fastest qualifying lap
-- `GapToPole` - Time difference from pole position
-- `QualifyingPerformance` - Normalized qualifying metric
+### Confidence scores
 
-### 3. Model Training
-Open and run the Jupyter notebooks in order:
+Per-driver confidence in `/predict_next_race` is computed as:
 
-1. **`feature_and_eda.ipynb`** - Exploratory data analysis with qualifying visualizations
-2. **`race_winner_model.ipynb`** - Train race winner classifier
-3. **`lap_time_model.ipynb`** - Train lap time regressor
-4. **`next_race_predict.ipynb`** - Train race position predictor
-
-## API Usage
-
-### Start the Server
-
-```bash
-uvicorn app:app --host 127.0.0.1 --port 8000
+```
+confidence = model_R² × (1 - |form_trend| / 5)
 ```
 
-Or with auto-reload for development:
-```bash
-uvicorn app:app --host 127.0.0.1 --port 8000 --reload
-```
-
-### API Endpoints
-
-#### 1. Health Check
-```bash
-GET http://127.0.0.1:8000/health
-```
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "timestamp": "2025-12-18T22:00:00",
-  "models_loaded": {
-    "race_winner": "xgb_racewin_pipeline.pk1",
-    "lap_time": "xgb_laptime_pipeline.pk1",
-    "race_position": "race_prediction_pipeline.pk1"
-  }
-}
-```
-
-#### 2. Predict Race Winner
-```bash
-POST http://127.0.0.1:8000/predict
-Content-Type: application/json
-
-{
-  "Team": "Red Bull Racing",
-  "Position": 1,
-  "GridPosition": 1,
-  "driver_win_rate": 0.45,
-  "team_reliability": 0.95,
-  "BestQualifyingTime": 78.5,
-  "GapToPole": 0.0,
-  "QualifyingPerformance": 1.0
-}
-```
-
-**Response:**
-```json
-{
-  "prediction": 1,
-  "probability": 0.98,
-  "team": "Red Bull Racing"
-}
-```
-
-#### 3. Predict Lap Time
-```bash
-POST http://127.0.0.1:8000/predict_laptime
-Content-Type: application/json
-
-{
-  "driver": "M VERSTAPPEN",
-  "lap": 25,
-  "tire_age": 10,
-  "compound": "SOFT"
-}
-```
-
-**Response:**
-```json
-{
-  "predicted_laptime": 82.45,
-  "driver": "M VERSTAPPEN",
-  "lap": 25,
-  "tire_compound": "SOFT",
-  "tire_age": 10
-}
-```
-
-#### 4. Predict Next Race (All Drivers)
-```bash
-GET http://127.0.0.1:8000/predict_next_race?lookback_races=6
-```
-
-**Parameters:**
-- `lookback_races` (optional): Number of previous races to analyze (default: 6, range: 3-12)
-
-**Response:**
-```json
-{
-  "predictions": [
-    {
-      "predicted_position": 2.38,
-      "driver": "M VERSTAPPEN",
-      "team": "Red Bull Racing",
-      "confidence": 0.85,
-      "recent_form": {
-        "avg_position": 3.83,
-        "best_position": 1,
-        "podiums": 3,
-        "wins": 1,
-        "dnfs": 0,
-        "reliability": 100.0,
-        "form_trend": 1.0
-      }
-    }
-  ],
-  "prediction_date": "2025-12-18 22:00",
-  "next_race": "Next Grand Prix (based on last 6 races)"
-}
-```
+`model_R²` comes from `models/metrics.json` (written at train time). Drivers with erratic recent form get lower confidence than drivers with consistent results.
 
 ## Configuration
 
-### Lookback Period
-Adjust the number of previous races used for prediction in `app.py`:
+All paths, season, grid constants, and model hyperparameters live in `config.yaml`. Nothing is hardcoded in the pipeline code.
 
-```python
-DEFAULT_LOOKBACK_RACES = 6  # Optimal: 5-8 races
-MIN_LOOKBACK = 3
-MAX_LOOKBACK = 12
+```yaml
+paths:
+  data_dir: data
+  models_dir: models
+  cache_dir: fastf1_cache
+  plots_dir: outputs/plots
+
+pipeline:
+  season: 2026
+  lookback_races: 6      # rolling window for historical features (optimal: 5-8)
+  min_lookback: 3
+  max_lookback: 12
+  api_sleep_seconds: 2
+
+constants:
+  grid_size: 20                  # max grid positions (used for QualifyingPerformance %)
+  race_phase_bins: [0, 15, 40, 100]
+  position_bins: [0, 5, 10, 15, 20]
+  default_tire: "MEDIUM"
+  unknown_position: 15
+  completed_statuses:            # statuses NOT counted as DNF
+    - "Finished"
+    - "+1 Lap"
+    - "+2 Laps"
+    - "+3 Laps"
+    - "+4 Laps"
+    - "+5 Laps"
+
+logging:
+  level: INFO
+
+api:
+  cors_origins: ["*"]
+  data_freshness_hours: 48       # /health reports "degraded" if data is older than this
+
+models:
+  laptime:
+    n_estimators: 1000
+    learning_rate: 0.01
+    max_depth: 5
+    random_state: 42
+  racewin:                       # same keys, different values
+    ...
+  position:
+    ...
 ```
 
-### Data Filtering
-The API automatically filters for **2025 season data only** when making predictions, ensuring forecasts are based on current season performance.
+To switch seasons, change `season:` in `config.yaml` and run `python main.py run-all`.
 
-## Model Features
+## Models
 
-### Historical Features (15+)
-1. `avg_position_last` - Average finishing position over last N races
-2. `best_position_last` - Best position achieved
-3. `avg_grid_last` - Average starting grid position
-4. `dnf_last` - Number of DNFs (Did Not Finish)
-5. `reliability_rate` - Percentage of races finished
-6. `avg_positions_gained` - Average positions gained from grid to finish
-7. `podiums_last` - Podium finishes in period
-8. `wins_last` - Race wins in period
-9. `points_last` - Total points scored
-10. `form_trend` - Recent vs older form comparison
-11. `avg_quali_time` - Average qualifying lap time
-12. `avg_gap_to_pole` - Average gap to pole position
+Three XGBoost models saved as full sklearn `Pipeline` objects (preprocessor + model in one pickle). Training metrics are saved to `models/metrics.json` and exposed at `/health`.
 
-### Qualifying Features
-- **BestQualifyingTime**: Fastest lap in Q1/Q2/Q3
-- **GapToPole**: Time difference from pole position
-- **QualifyingPerformance**: Normalized performance score
+| Model file | Task | Training evaluation |
+|------------|------|---------------------|
+| `xgb_racewin_pipeline.pkl` | Binary classification — will this driver win? | Accuracy + F1, stratified 5-fold CV |
+| `xgb_laptime_pipeline.pkl` | Regression — predicted lap time (seconds) | MAE + R², 5-fold CV |
+| `race_prediction_pipeline.pkl` | Regression — predicted finishing position | MAE + R², 5-fold CV |
 
-## Performance
+### Lap time features (20 total)
 
-### Model Accuracy
-- **Race Winner Model**: 100% accuracy (Random Forest/Gradient Boosting)
-- **Expected Improvement**: 70-75% → 80-85% with qualifying features
-- **Lookback Optimal Range**: 5-8 races for best balance
+Base: `Race`, `Driver`, `Team`, `Position`, `TireCompound`, `TireAge`, `driver_win_rate`, `team_reliability`
 
-### Prediction Insights
-- Qualifying position strongly correlates with race results (correlation ~0.75)
-- Pole position win rate: ~40%
-- Front row (P1-P2) win rate: ~60%
-- Top 3 quali positions lead to ~70% podium rate
+Engineered: `TireCompound_encoded`, `IsFreshTire`, `StintLapNumber`, `LapNumber_normalized`, `FuelLoadProxy`, `IsOutlap`, `IsInlap`, `positions_gained`, `tire_degradation`, `RollingAvgLapTime_3`, `RollingAvgLapTime_5`, `LapTimeStd_5`
 
-## Exploratory Data Analysis
+### Race position features (up to 19)
 
-The `feature_and_eda.ipynb` notebook includes:
+Rolling per-driver over last N races: `avg_position_last`, `best_position_last`, `avg_grid_last`, `dnf_last`, `reliability_rate`, `avg_positions_gained`, `podiums_last`, `wins_last`, `points_last`, `form_trend`
 
-### Qualifying Analysis (9 visualizations)
-- Qualifying position distribution by team
-- Gap to pole distribution and trends
-- Q1/Q2/Q3 session time progressions
-- Driver consistency and averages
-- Top 10 qualifying success rates
+Plus qualifying: `GridPosition`, `QualifyingPerformance`, `PositionChange`, `avg_quali_time`, `avg_gap_to_pole`
 
-### Qualifying vs Race Correlation (6 visualizations)
-- Position scatter plots with correlation coefficients
-- Win/podium rates by qualifying position
-- Positions gained/lost analysis
-- Gap to pole impact on race results
+## API Reference
 
-### Correlation Matrix
-- Heatmap of all feature relationships
-- Qualifying metric impact on race outcomes
+Start the server: `python main.py serve`
 
-## Development
+### `GET /health`
 
-### Running in Development Mode
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-06-17T12:00:00",
+  "models_loaded": {
+    "race_winner": true,
+    "lap_time": true,
+    "race_position": true
+  },
+  "data_available": {
+    "results": true,
+    "laps": true,
+    "qualifying": true
+  },
+  "data_age_hours": 2.4,
+  "data_fresh": true,
+  "model_metrics": {
+    "laptime": { "mae": 0.586, "r2": 0.976, "cv_mae_mean": 1.097, "features_used": 20 },
+    "racewin": { "accuracy": 1.0, "f1": 1.0, "cv_accuracy_mean": 1.0 },
+    "position": { "mae": 2.959, "r2": 0.677, "cv_mae_mean": 2.137 }
+  },
+  "config": { "season": 2026, "default_lookback_races": 6, "lookback_range": "3-12" }
+}
+```
+
+`status` is `"degraded"` if any model failed to load or if data is older than `data_freshness_hours`.
+
+### `GET /predict_next_race?lookback_races=6`
+
+Returns predicted finishing positions for all drivers with recent form breakdown. `lookback_races` is configurable (3–12, default from config).
+
+Uses real qualifying data automatically if `fetch-qualifying` has been run for this weekend. Response includes `model_r2` from the last training run.
+
+### `POST /predict` — Race winner probability
+
+```json
+{
+  "Team": "Ferrari",
+  "Position": 1,
+  "GridPosition": 1,
+  "driver_win_rate": 14.3,
+  "team_reliability": 85.7,
+  "BestQualifyingTime": 78.792,
+  "GapToPole": 0.0,
+  "QualifyingPerformance": 5.0
+}
+```
+
+Returns `will_win` (bool), `win_probability` (0–1 float), `confidence` (high/medium).
+
+Field constraints: `GridPosition` and `Position` must be 1–26; rates must be 0–100. Returns HTTP 422 if violated.
+
+### `POST /predict_laptime` — Lap time prediction
+
+```json
+{
+  "Race": "Monaco",
+  "Driver": "HAM",
+  "Team": "Ferrari",
+  "Position": 1,
+  "TireCompound": "MEDIUM",
+  "TireAge": 12,
+  "driver_win_rate": 14.3,
+  "team_reliability": 85.7
+}
+```
+
+Returns `predicted_laptime_seconds`, `predicted_laptime_formatted` (M:SS.mmm), `tire_wear_pct`, and `is_fresh_tire`. All derived tire fields are auto-computed if omitted.
+
+All endpoints return HTTP 503 with an actionable message if the relevant model is not loaded.
+
+## Automated Visualizations
+
+Running `clean` or `features` automatically saves diagnostic PNGs to `outputs/plots/`.
+
+**After `python main.py clean` → `outputs/plots/cleaning/`**
+
+| File | What it shows |
+|------|---------------|
+| `lap_time_distribution.png` | Raw vs cleaned lap time histograms overlaid |
+| `outliers_boxplot.png` | Lap time spread per race after outlier removal |
+| `missing_data_heatmap.png` | % missing per column per race before cleaning |
+| `data_completeness.png` | Lap count retained per Grand Prix weekend |
+
+**After `python main.py features` → `outputs/plots/features/`**
+
+| File | What it shows |
+|------|---------------|
+| `correlation_matrix.png` | Numeric feature correlations vs race targets |
+| `driver_win_rate.png` | Win rate per driver (sorted) |
+| `tire_degradation_by_compound.png` | Lap-to-lap delta per compound |
+| `race_phase_distribution.png` | Lap count by Early / Middle / Late phase |
+| `team_reliability.png` | % races finished per team |
+
+**After `python main.py evaluate-laptime` → `outputs/plots/evaluation/`**
+
+| File | What it shows |
+|------|---------------|
+| `round{N}_actual_vs_predicted.png` | Scatter of real vs predicted lap times |
+| `round{N}_residuals.png` | Error distribution histogram |
+| `round{N}_driver_mae.png` | Per-driver MAE bar chart |
+
+## Running Tests
+
 ```bash
-# Start server with auto-reload
-uvicorn app:app --reload --host 127.0.0.1 --port 8000
+# Run all tests
+python -m pytest tests/ -v
+
+# With coverage report
+python -m pytest tests/ -v --cov=pipeline --cov=app --cov-report=term-missing
 ```
 
-### Adding New Features
-1. Update `data_cleaning.py` to create new features
-2. Modify `create_historical_features()` in `app.py`
-3. Retrain models in Jupyter notebooks
-4. Update API response models if needed
+Tests cover config validation, pipeline unit logic (feature engineering, cleaning, status handling), and API endpoint behaviour (input validation, 503 on missing models, health check shape). Tests that require trained models or live FastF1 data are marked to skip gracefully when those aren't present.
+
+## Deployment
+
+### Docker
+
+```bash
+# Build and run
+docker build -t f1-predictor .
+docker run -p 8000:8000 -v $(pwd)/data:/app/data -v $(pwd)/models:/app/models f1-predictor
+
+# Or with Docker Compose
+docker-compose up
+```
+
+The container runs gunicorn with 2 uvicorn workers. Mount `data/` and `models/` as volumes so trained models and feature CSVs persist outside the container.
+
+### Manual (systemd / VPS)
+
+```bash
+gunicorn app:app --worker-class uvicorn.workers.UvicornWorker --workers 2 --bind 0.0.0.0:8000
+```
 
 ## Data Sources
 
-- **FastF1 API**: Official F1 timing data
-- **Seasons**: 2025 (24 races - complete season through Abu Dhabi)
-- **Cache**: `fastf1_cache/` directory for faster subsequent loads
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+- **FastF1**: Official F1 timing and telemetry API
+- **Season**: 2026 (new regulations — 2025 data not used)
+- **Cache**: `fastf1_cache/` stores session data locally after first fetch, making reruns fast
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [FastF1](https://github.com/theOehrly/Fast-F1) - F1 timing data API
-- [FastAPI](https://fastapi.tiangolo.com/) - Modern web framework
-- [XGBoost](https://xgboost.readthedocs.io/) - Gradient boosting library
-- Formula 1 - For the amazing sport
-
-## Contact
-
-For questions or support, please open an issue in the repository.
-
----
-
-**Note**: Predictions are for educational and entertainment purposes only. Actual race results may vary due to weather, strategy, incidents, and other unpredictable factors.
+MIT — see [LICENSE](LICENSE).
