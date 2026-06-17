@@ -1,217 +1,191 @@
-from fastapi import FastAPI, HTTPException, Query
+from __future__ import annotations
+
+import json
 import logging
+import os
+import time
 from datetime import datetime
-from pydantic import BaseModel
-import pandas as pd
-import pickle
 from typing import Optional
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+import pandas as pd
+import pickle
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from pipeline.config_loader import get_config
+from pipeline.features import create_historical_features
+
+_cfg = get_config()
+
+logging.basicConfig(
+    level=getattr(logging, _cfg.logging.level.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-# Configuration
-DEFAULT_LOOKBACK_RACES = 6  # Optimal: 5-8 races for recent form
-MIN_LOOKBACK = 3
-MAX_LOOKBACK = 12
+DEFAULT_LOOKBACK_RACES = _cfg.pipeline.lookback_races
+MIN_LOOKBACK = _cfg.pipeline.min_lookback
+MAX_LOOKBACK = _cfg.pipeline.max_lookback
 
-# Create FastAPI app
 app = FastAPI(
     title="F1 Race Winner Prediction API",
     description="API for predicting F1 race winners",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-# Load model once when app starts
-with open('models/xgb_racewin_pipeline.pk1', 'rb') as f:
-    win_model = pickle.load(f)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cfg.api.cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Single prediction input model (8 features with qualifying data)
+
+def _load_pickle(path):
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        logger.warning("Could not load model %s: %s", path, e)
+        return None
+
+
+win_model = _load_pickle(_cfg.paths.models_dir / "xgb_racewin_pipeline.pkl")
+laptime_pipeline = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_pipeline.pkl")
+race_model = _load_pickle(_cfg.paths.models_dir / "race_prediction_pipeline.pkl")
+_laptime_features = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_features.pkl")
+
+_metrics: dict = {}
+_metrics_path = _cfg.paths.models_dir / "metrics.json"
+if _metrics_path.exists():
+    try:
+        _metrics = json.loads(_metrics_path.read_text())
+    except Exception as e:
+        logger.warning("Could not load metrics.json: %s", e)
+
+
 class RaceInput(BaseModel):
     Team: str
-    Position: int
-    GridPosition: int  
-    driver_win_rate: float
-    team_reliability: float
+    Position: int = Field(..., ge=1, le=26)
+    GridPosition: int = Field(..., ge=1, le=26)
+    driver_win_rate: float = Field(..., ge=0.0, le=100.0)
+    team_reliability: float = Field(..., ge=0.0, le=100.0)
     BestQualifyingTime: Optional[float] = None
-    GapToPole: Optional[float] = None
-    QualifyingPerformance: Optional[float] = None
+    GapToPole: Optional[float] = Field(default=None, ge=0.0)
+    QualifyingPerformance: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+
 
 @app.post("/predict")
 def predict(race: RaceInput):
-    """Predict race winner probability (8 features, 100% accuracy)"""
+    """Predict race winner probability."""
+    if win_model is None:
+        raise HTTPException(status_code=503, detail="Race win model not loaded. Run: python main.py train --model racewin")
     try:
-        input_data = race.dict()
-        
-        required_features = ['Team', 'Position', 'GridPosition', 'driver_win_rate', 'team_reliability',
-                           'BestQualifyingTime', 'GapToPole', 'QualifyingPerformance']
-        
-        missing_features = [f for f in required_features if input_data.get(f) is None]
-        if missing_features:
-            logger.warning(f"Missing features: {missing_features}. Prediction may be less accurate.")
-        
+        input_data = race.model_dump()
         df = pd.DataFrame([input_data])
-        
         if df.isnull().any().any():
-            raise ValueError("Input contains missing values. All 8 features (including qualifying data) are required for accurate predictions.")
-        
+            raise HTTPException(
+                status_code=422,
+                detail="Input contains missing values. All features including qualifying data are required.",
+            )
+
         prediction = win_model.predict(df)[0]
-        probability = win_model.predict_proba(df)[0][1]
-        
+        probability = float(win_model.predict_proba(df)[0][1])
+
+        confidence = "high" if probability > 0.7 or probability < 0.3 else "medium"
+        logger.info(
+            "predict | team=%s grid=%d | will_win=%s prob=%.4f",
+            race.Team, race.GridPosition, bool(prediction), probability,
+        )
         return {
             "will_win": bool(prediction),
-            "win_probability": round(float(probability), 4),
-            "confidence": "high" if probability > 0.7 or probability < 0.3 else "medium",
-            "features_used": 8,
-            "includes_qualifying": True
+            "win_probability": round(probability, 4),
+            "confidence": confidence,
+            "features_used": len(input_data),
+            "includes_qualifying": True,
         }
-    except ValueError as ve:
-        logger.error(f"Validation error: {str(ve)}")
-        raise HTTPException(status_code=422, detail=str(ve))
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Prediction failed: {str(e)}")
+        logger.error("Prediction error: %s", e)
+        raise HTTPException(status_code=400, detail=f"Prediction failed: {e}")
 
-
-with open('models/xgb_laptime_pipeline.pk1', 'rb') as f:
-    laptime_pipeline = pickle.load(f)
 
 class LapTimeInput(BaseModel):
-    # Base required features
     Race: str
     Driver: str
     Team: str
-    Position: int
+    Position: int = Field(..., ge=1, le=26)
     TireCompound: str
-    TireAge: int
-    driver_win_rate: float
-    team_reliability: float
-    
-    # Optional advanced features (will be computed if not provided)
+    TireAge: int = Field(..., ge=0)
+    driver_win_rate: float = Field(..., ge=0.0, le=100.0)
+    team_reliability: float = Field(..., ge=0.0, le=100.0)
     TireCompound_encoded: Optional[float] = None
-    TireLifeRemaining: Optional[float] = None
-    TireDegradationRate: Optional[float] = None
     IsFreshTire: Optional[int] = None
-    TireWearPct: Optional[float] = None
-    MaxTireLife: Optional[float] = None
-    GapToCarAhead: Optional[float] = 0.0
-    GapToCarBehind: Optional[float] = 0.0
-    DRS_Available: Optional[int] = 0
-    TrafficDensity: Optional[int] = 10
-    FuelLoadProxy: Optional[float] = 0.5
-    RacePhase_encoded: Optional[int] = 1
-    LapsRemaining: Optional[int] = 30
-    LapProgress: Optional[float] = 0.5
     StintLapNumber: Optional[int] = None
-    MaxLapsInRace: Optional[int] = 60
+    FuelLoadProxy: Optional[float] = Field(default=0.5, ge=0.0, le=1.0)
+    LapNumber_normalized: Optional[float] = Field(default=0.5, ge=0.0, le=1.0)
+    IsOutlap: Optional[int] = 0
+    IsInlap: Optional[int] = 0
+    positions_gained: Optional[float] = 0.0
+    tire_degradation: Optional[float] = 0.0
     RollingAvgLapTime_3: Optional[float] = None
     RollingAvgLapTime_5: Optional[float] = None
     LapTimeStd_5: Optional[float] = 0.5
-    TeamAvgPace: Optional[float] = None
-    DriverVsTeamPace: Optional[float] = 0.0
-    PctOffBestLap: Optional[float] = 5.0
-    TrackEvolution: Optional[float] = 0.5
-    LapNumber_normalized: Optional[float] = 0.5
-    IsOutlap: Optional[int] = 0
-    IsInlap: Optional[int] = 0
-    OldTiresIndicator: Optional[int] = 0
+
+
+_TIRE_COMPOUND_MAP = {"SOFT": 1, "MEDIUM": 2, "HARD": 3, "INTERMEDIATE": 4, "WET": 5}
+_TIRE_LIFE_MAP = {"SOFT": 40, "MEDIUM": 50, "HARD": 60}
+_DEFAULT_LAPTIME = 95.0
+
 
 @app.post("/predict_laptime")
 def predict_laptime(lap: LapTimeInput):
-    """Predict lap time with 30+ features (auto-computes if missing)"""
+    """Predict lap time (auto-computes derived fields if not provided)."""
+    if laptime_pipeline is None:
+        raise HTTPException(status_code=503, detail="Lap time model not loaded. Run: python main.py train --model laptime")
     try:
-        lap_dict = lap.dict()
-        
-        tire_compound_map = {'SOFT': 1, 'MEDIUM': 2, 'HARD': 3}
-        tire_life_map = {'SOFT': 40, 'MEDIUM': 50, 'HARD': 60}
-        
-        if lap_dict['TireCompound_encoded'] is None:
-            lap_dict['TireCompound_encoded'] = tire_compound_map.get(lap.TireCompound.upper(), 2)
-        
-        if lap_dict['MaxTireLife'] is None:
-            lap_dict['MaxTireLife'] = tire_life_map.get(lap.TireCompound.upper(), 50)
-        
-        if lap_dict['TireLifeRemaining'] is None:
-            lap_dict['TireLifeRemaining'] = max(0, lap_dict['MaxTireLife'] - lap.TireAge)
-        
-        if lap_dict['TireDegradationRate'] is None:
-            lap_dict['TireDegradationRate'] = 0.0
-        
-        if lap_dict['IsFreshTire'] is None:
-            lap_dict['IsFreshTire'] = 1 if lap.TireAge <= 3 else 0
-        
-        if lap_dict['TireWearPct'] is None:
-            lap_dict['TireWearPct'] = min(100, (lap.TireAge / lap_dict['MaxTireLife']) * 100)
-        
-        if lap_dict['StintLapNumber'] is None:
-            lap_dict['StintLapNumber'] = lap.TireAge
-        
-        if lap_dict['OldTiresIndicator'] is None:
-            lap_dict['OldTiresIndicator'] = 1 if lap_dict['TireWearPct'] > 80 else 0
-        
-        if lap_dict['RollingAvgLapTime_3'] is None or lap_dict['RollingAvgLapTime_5'] is None:
-            estimated_laptime = 95.0
-            lap_dict['RollingAvgLapTime_3'] = estimated_laptime
-            lap_dict['RollingAvgLapTime_5'] = estimated_laptime
-            lap_dict['TeamAvgPace'] = estimated_laptime
-        
-        df = pd.DataFrame([lap_dict])
-        predicted_laptime = laptime_pipeline.predict(df)[0]
-        
-        minutes = int(predicted_laptime // 60)
-        seconds = predicted_laptime % 60
-        
+        d = lap.model_dump()
+        compound = lap.TireCompound.upper()
+        max_tire_life = _TIRE_LIFE_MAP.get(compound, 50)
+
+        if d["TireCompound_encoded"] is None:
+            d["TireCompound_encoded"] = _TIRE_COMPOUND_MAP.get(compound, 2)
+        if d["IsFreshTire"] is None:
+            d["IsFreshTire"] = 1 if lap.TireAge <= 3 else 0
+        if d["StintLapNumber"] is None:
+            d["StintLapNumber"] = lap.TireAge
+        if d["RollingAvgLapTime_3"] is None:
+            d["RollingAvgLapTime_3"] = _DEFAULT_LAPTIME
+        if d["RollingAvgLapTime_5"] is None:
+            d["RollingAvgLapTime_5"] = _DEFAULT_LAPTIME
+
+        # Only pass the features the model was actually trained on
+        trained_features = _laptime_features["features"] if _laptime_features else list(d.keys())
+        df_input = pd.DataFrame([{k: d[k] for k in trained_features if k in d}])
+        predicted = float(laptime_pipeline.predict(df_input)[0])
+
+        minutes = int(predicted // 60)
+        seconds = predicted % 60
+        tire_wear_pct = min(100, (lap.TireAge / max_tire_life) * 100)
+
+        logger.info(
+            "predict_laptime | driver=%s compound=%s age=%d | predicted=%.3fs",
+            lap.Driver, compound, lap.TireAge, predicted,
+        )
         return {
-            "predicted_laptime_seconds": round(float(predicted_laptime), 3),
+            "predicted_laptime_seconds": round(predicted, 3),
             "predicted_laptime_formatted": f"{minutes}:{seconds:06.3f}",
             "tire_compound": lap.TireCompound,
             "tire_age": lap.TireAge,
-            "tire_wear_pct": round(lap_dict['TireWearPct'], 1),
-            "is_fresh_tire": bool(lap_dict['IsFreshTire']),
-            "tire_life_remaining": int(lap_dict['TireLifeRemaining'])
+            "tire_wear_pct": round(tire_wear_pct, 1),
+            "is_fresh_tire": bool(d["IsFreshTire"]),
         }
     except Exception as e:
-        logger.error(f"Lap time prediction error: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Prediction failed: {str(e)}")
+        logger.error("Lap time prediction error: %s", e)
+        raise HTTPException(status_code=400, detail=f"Prediction failed: {e}")
 
-
-with open('models/race_prediction_pipeline.pk1', 'rb') as f:
-    race_model = pickle.load(f)
-
-def create_historical_features(df, n_previous=DEFAULT_LOOKBACK_RACES):
-    """Create rolling features from recent race history"""
-    features = []
-    
-    for driver in df['Driver'].unique():
-        driver_data = df[df['Driver'] == driver].copy().reset_index(drop=True)
-        
-        driver_data['avg_position_last'] = driver_data['Position'].rolling(n_previous, min_periods=1).mean()
-        driver_data['best_position_last'] = driver_data['Position'].rolling(n_previous, min_periods=1).min()
-        driver_data['avg_grid_last'] = driver_data['GridPosition'].rolling(n_previous, min_periods=1).mean()
-        
-        driver_data['is_dnf'] = (~driver_data['Status'].str.contains('Finished', na=False)).astype(int)
-        driver_data['dnf_last'] = driver_data['is_dnf'].rolling(n_previous, min_periods=1).sum()
-        driver_data['reliability_rate'] = 1 - (driver_data['dnf_last'] / n_previous)
-        
-        driver_data['positions_gained'] = driver_data['GridPosition'] - driver_data['Position']
-        driver_data['avg_positions_gained'] = driver_data['positions_gained'].rolling(n_previous, min_periods=1).mean()
-        
-        driver_data['podiums_last'] = (driver_data['Position'] <= 3).astype(int).rolling(n_previous, min_periods=1).sum()
-        driver_data['wins_last'] = (driver_data['Position'] == 1).astype(int).rolling(n_previous, min_periods=1).sum()
-        driver_data['points_last'] = driver_data['Points'].rolling(n_previous, min_periods=1).sum()
-        
-        if 'BestQualifyingTime' in driver_data.columns:
-            driver_data['avg_quali_time'] = driver_data['BestQualifyingTime'].rolling(n_previous, min_periods=1).mean()
-            driver_data['avg_gap_to_pole'] = driver_data['GapToPole'].rolling(n_previous, min_periods=1).mean()
-        
-        recent_avg = driver_data['Position'].rolling(3, min_periods=1).mean()
-        older_avg = driver_data['Position'].shift(3).rolling(n_previous-3, min_periods=1).mean()
-        driver_data['form_trend'] = older_avg - recent_avg
-        
-        features.append(driver_data)
-    
-    result = pd.concat(features, ignore_index=True)
-    return result
 
 class DriverPrediction(BaseModel):
     predicted_position: float
@@ -220,10 +194,12 @@ class DriverPrediction(BaseModel):
     confidence: float
     recent_form: dict
 
+
 class RacePrediction(BaseModel):
     predictions: list[DriverPrediction]
     prediction_date: str
     next_race: str
+    model_r2: Optional[float] = None
 
 
 @app.get("/predict_next_race", response_model=RacePrediction)
@@ -232,124 +208,168 @@ async def predict_next_race(
         default=DEFAULT_LOOKBACK_RACES,
         ge=MIN_LOOKBACK,
         le=MAX_LOOKBACK,
-        description="Number of previous races to consider (optimal: 5-8)"
+        description="Number of previous races to consider (optimal: 5-8)",
     )
 ):
-    """Predict next race positions for all drivers (20+ features)"""
+    """Predict next race positions for all drivers."""
+    if race_model is None:
+        raise HTTPException(status_code=503, detail="Race position model not loaded. Run: python main.py train --model position")
     try:
-        logger.info(f"Loading F1 results data with {lookback_races} race lookback...")
+        results_path = _cfg.paths.data_dir / "f1_results_features.csv"
         try:
-            f1_results = pd.read_csv("data/f1_results_features.csv")
+            f1_results = pd.read_csv(results_path)
         except FileNotFoundError:
             raise HTTPException(
                 status_code=404,
-                detail="Results data not found. Run data_collection.py and data_cleaning.py first."
+                detail="Results data not found. Run: python main.py features",
             )
 
-        f1_results_2025 = f1_results[f1_results['Year'] == 2025].copy()
-        logger.info(f"Using {len(f1_results_2025)} records from 2025 season only")
+        season = _cfg.pipeline.season
+        season_data = f1_results[f1_results["Year"] == season].copy()
+        logger.info("Using %d records from %s season.", len(season_data), season)
 
-        logger.info("Creating historical features...")
-        processed_data = create_historical_features(f1_results_2025, n_previous=lookback_races)
-        
-        if processed_data.empty:
-            raise HTTPException(status_code=500, detail="No data after processing")
+        completed_statuses = _cfg.constants.completed_statuses
+        processed = create_historical_features(
+            season_data, n_previous=lookback_races, completed_statuses=completed_statuses
+        )
+        if processed.empty:
+            raise HTTPException(status_code=500, detail="No data after processing.")
 
-        logger.info("Getting latest data for active drivers...")
-        latest_data = processed_data.groupby('Driver').last().reset_index()
-        latest_data = latest_data[latest_data['avg_position_last'].notna()]
-        
+        latest = processed.groupby("Driver").last().reset_index()
+        latest = latest[latest["avg_position_last"].notna()]
+
+        # Override with real qualifying data if available
+        upcoming_path = _cfg.paths.data_dir / "upcoming_qualifying.csv"
+        using_real_qualifying = False
+        race_label = "Next Grand Prix"
+        if upcoming_path.exists():
+            quali = pd.read_csv(upcoming_path)
+            race_label = quali["RaceName"].iloc[0] if "RaceName" in quali.columns else "Next Grand Prix"
+            for _, q_row in quali.iterrows():
+                driver_mask = latest["Driver"] == q_row["Driver"]
+                if not driver_mask.any():
+                    continue
+                for col in ["GridPosition", "BestQualifyingTime", "GapToPole", "QualifyingPerformance"]:
+                    if col in quali.columns:
+                        latest.loc[driver_mask, col] = q_row[col]
+            using_real_qualifying = True
+            logger.info("Applied real qualifying data from %s (%d drivers).", race_label, len(quali))
+        else:
+            logger.info("No upcoming_qualifying.csv found — using historical grid positions.")
+
         race_features = [
-            'Driver', 'Team', 'GridPosition',
-            'driver_win_rate', 'team_reliability', 'QualifyingPerformance', 'PositionChange',
-            'avg_position_last', 'best_position_last', 'avg_grid_last',
-            'dnf_last', 'reliability_rate', 'avg_positions_gained',
-            'podiums_last', 'wins_last', 'points_last', 'form_trend'
+            "Driver", "Team", "GridPosition",
+            "driver_win_rate", "team_reliability", "QualifyingPerformance", "PositionChange",
+            "avg_position_last", "best_position_last", "avg_grid_last",
+            "dnf_last", "reliability_rate", "avg_positions_gained",
+            "podiums_last", "wins_last", "points_last", "form_trend",
         ]
-        
-        if 'avg_quali_time' in latest_data.columns:
-            race_features.extend(['avg_quali_time', 'avg_gap_to_pole'])
-        
-        missing_features = [f for f in race_features if f not in latest_data.columns]
-        if missing_features:
-            logger.warning(f"Missing features: {missing_features}")
-            race_features = [f for f in race_features if f in latest_data.columns]
+        if "avg_quali_time" in latest.columns:
+            race_features.extend(["avg_quali_time", "avg_gap_to_pole"])
 
-        logger.info("Making predictions...")
-        predictions = race_model.predict(latest_data[race_features])
-        
-        results = []
-        for idx, row in latest_data.iterrows():
+        available = [f for f in race_features if f in latest.columns]
+        missing = [f for f in race_features if f not in latest.columns]
+        if missing:
+            logger.warning("Missing features for prediction: %s", missing)
+
+        predictions = race_model.predict(latest[available])
+
+        # Use stored R² as model-level confidence; use form consistency for per-driver confidence
+        model_r2 = _metrics.get("position", {}).get("r2")
+
+        results_list = []
+        for idx, row in latest.iterrows():
             try:
+                # Per-driver confidence: higher when form is consistent (low std across recent positions)
+                form_consistency = 1.0 - min(1.0, abs(float(row.get("form_trend", 0))) / 5.0)
+                driver_confidence = round(
+                    (model_r2 if model_r2 is not None else 0.5) * form_consistency, 3
+                )
+
                 recent_form = {
-                    "avg_position": round(float(row['avg_position_last']), 2),
-                    "best_position": int(row['best_position_last']) if 'best_position_last' in row else None,
-                    "podiums": int(row['podiums_last']),
-                    "wins": int(row['wins_last']) if 'wins_last' in row else 0,
-                    "dnfs": int(row['dnf_last']),
-                    "reliability": round(float(row['reliability_rate']) * 100, 1) if 'reliability_rate' in row else None,
-                    "form_trend": round(float(row['form_trend']), 2) if pd.notna(row.get('form_trend')) else None,
-                    "driver_win_rate": round(float(row['driver_win_rate']) * 100, 1) if 'driver_win_rate' in row else None,
-                    "team_reliability": round(float(row['team_reliability']), 1) if 'team_reliability' in row else None,
-                    "quali_performance": round(float(row['QualifyingPerformance']), 2) if 'QualifyingPerformance' in row else None
+                    "avg_position": round(float(row["avg_position_last"]), 2),
+                    "best_position": int(row["best_position_last"]) if "best_position_last" in row else None,
+                    "podiums": int(row["podiums_last"]),
+                    "wins": int(row["wins_last"]) if "wins_last" in row else 0,
+                    "dnfs": int(row["dnf_last"]),
+                    "reliability": round(float(row["reliability_rate"]) * 100, 1) if "reliability_rate" in row else None,
+                    "form_trend": round(float(row["form_trend"]), 2) if pd.notna(row.get("form_trend")) else None,
+                    "driver_win_rate": round(float(row["driver_win_rate"]) * 100, 1) if "driver_win_rate" in row else None,
+                    "team_reliability": round(float(row["team_reliability"]), 1) if "team_reliability" in row else None,
+                    "quali_performance": round(float(row["QualifyingPerformance"]), 2) if "QualifyingPerformance" in row else None,
                 }
-                
-                results.append(DriverPrediction(
+                results_list.append(DriverPrediction(
                     predicted_position=round(float(predictions[idx]), 2),
-                    driver=str(row['Driver']),
-                    team=str(row['Team']),
-                    confidence=0.85,
-                    recent_form=recent_form
+                    driver=str(row["Driver"]),
+                    team=str(row["Team"]),
+                    confidence=driver_confidence,
+                    recent_form=recent_form,
                 ))
             except Exception as e:
-                logger.error(f"Error processing {row.get('Driver', 'Unknown')}: {str(e)}")
-                continue
-    
-        if not results:
-            raise HTTPException(status_code=500, detail="No valid predictions generated")
+                logger.error("Error processing %s: %s", row.get("Driver", "Unknown"), e)
 
-        results.sort(key=lambda x: x.predicted_position)
-    
-        return RacePrediction(
-            predictions=results[:20],
-            prediction_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            next_race="Next Grand Prix (based on last {} races)".format(lookback_races)
+        if not results_list:
+            raise HTTPException(status_code=500, detail="No valid predictions generated.")
+
+        results_list.sort(key=lambda x: x.predicted_position)
+        logger.info(
+            "predict_next_race | race=%s lookback=%d | %d drivers predicted",
+            race_label, lookback_races, len(results_list),
         )
-    
+
+        quali_note = "real qualifying" if using_real_qualifying else "historical grid positions"
+        return RacePrediction(
+            predictions=results_list[:20],
+            prediction_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            next_race=f"{race_label} — {quali_note}, last {lookback_races} races form",
+            model_r2=model_r2,
+        )
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in predict_next_race: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
-
+        logger.error("Error in predict_next_race: %s", e)
+        raise HTTPException(status_code=500, detail=f"Prediction error: {e}")
 
 
 @app.get("/health")
 def health():
-    """Health check endpoint with model and data status"""
+    """Health check endpoint with model and data status."""
     try:
-        # Check if data files exist
-        import os
-        data_status = {
-            "results": os.path.exists("data/f1_results_cleaned.csv"),
-            "laps": os.path.exists("data/f1_laps_cleaned.csv"),
-            "qualifying": os.path.exists("data/f1_qualifying_cleaned.csv")
-        }
-        
+        results_path = _cfg.paths.data_dir / "f1_results_features.csv"
+        data_age_hours = None
+        if results_path.exists():
+            age_seconds = time.time() - os.path.getmtime(results_path)
+            data_age_hours = round(age_seconds / 3600, 1)
+
+        freshness_threshold = _cfg.api.data_freshness_hours
+        data_stale = data_age_hours is not None and data_age_hours > freshness_threshold
+
+        status = "degraded" if (
+            win_model is None or race_model is None or laptime_pipeline is None or data_stale
+        ) else "healthy"
+
         return {
-            "status": "healthy",
+            "status": status,
             "timestamp": datetime.now().isoformat(),
             "models_loaded": {
-                "race_winner": "xgb_racewin_pipeline.pk1",
-                "lap_time": "xgb_laptime_pipeline.pk1",
-                "race_position": "race_prediction_pipeline.pk1"
+                "race_winner": win_model is not None,
+                "lap_time": laptime_pipeline is not None,
+                "race_position": race_model is not None,
             },
-            "data_available": data_status,
+            "data_available": {
+                "results": results_path.exists(),
+                "laps": (_cfg.paths.data_dir / "f1_laps_cleaned.csv").exists(),
+                "qualifying": (_cfg.paths.data_dir / "f1_qualifying_cleaned.csv").exists(),
+            },
+            "data_age_hours": data_age_hours,
+            "data_fresh": not data_stale,
+            "model_metrics": _metrics or None,
             "config": {
+                "season": _cfg.pipeline.season,
                 "default_lookback_races": DEFAULT_LOOKBACK_RACES,
-                "lookback_range": f"{MIN_LOOKBACK}-{MAX_LOOKBACK}"
-            }
+                "lookback_range": f"{MIN_LOOKBACK}-{MAX_LOOKBACK}",
+            },
         }
     except Exception as e:
         return {"status": "degraded", "error": str(e)}
-
