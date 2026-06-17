@@ -1,0 +1,51 @@
+paths:
+  data_dir: data
+  models_dir: models
+  cache_dir: fastf1_cache
+  plots_dir: outputs/plots
+
+pipeline:
+  season: 2026
+  lookback_races: 6
+  min_lookback: 3
+  max_lookback: 12
+  api_sleep_seconds: 2
+
+constants:
+  grid_size: 20
+  race_phase_bins: [0, 15, 40, 100]
+  position_bins: [0, 5, 10, 15, 20]
+  default_tire: "MEDIUM"
+  unknown_position: 15
+  completed_statuses:
+    - "Finished"
+    - "+1 Lap"
+    - "+2 Laps"
+    - "+3 Laps"
+    - "+4 Laps"
+    - "+5 Laps"
+
+logging:
+  level: INFO
+
+api:
+  cors_origins:
+    - "*"
+  data_freshness_hours: 48
+
+models:
+  laptime:
+    n_estimators: 1000
+    learning_rate: 0.01
+    max_depth: 5
+    random_state: 42
+  racewin:
+    n_estimators: 1000
+    learning_rate: 0.01
+    max_depth: 4
+    random_state: 42
+  position:
+    n_estimators: 1000
+    learning_rate: 0.01
+    max_depth: 5
+    random_state: 42
