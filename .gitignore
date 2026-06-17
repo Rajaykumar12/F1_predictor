@@ -1,11 +1,71 @@
+# ── Data artifacts ───────────────────────────────────────────────────────────
+data/f1_laps_simple.csv
+data/f1_results_simple.csv
+data/f1_qualifying_simple.csv
+data/f1_laps_cleaned.csv
+data/f1_results_cleaned.csv
+data/f1_qualifying_cleaned.csv
+data/f1_laps_features.csv
+data/f1_results_features.csv
+data/upcoming_qualifying.csv
+
+# ── Models ───────────────────────────────────────────────────────────────────
+models/*.pkl
+models/metrics.json
+
+# ── Cache & outputs ──────────────────────────────────────────────────────────
 fastf1_cache/
-*.tmp
-*.log
-data/
-models/
+outputs/
 
+# ── Environment & secrets ────────────────────────────────────────────────────
+.env
+.env.*
+*.env.local
+*.key
+secrets.yaml
 
-# Compiled Python files
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── Testing & coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editors ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs & temp files ────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
