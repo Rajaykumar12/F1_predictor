@@ -4,8 +4,10 @@ import json
 import logging
 import os
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 import pandas as pd
 import pickle
@@ -13,8 +15,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from pipeline.clean import run_cleaning
 from pipeline.config_loader import get_config
-from pipeline.features import create_historical_features
+from pipeline.evaluate import evaluate_laptime as _evaluate_laptime
+from pipeline.features import create_historical_features, run_feature_engineering
+from pipeline.fetch import fetch_upcoming_qualifying, run_fetch
+from pipeline.train import run_training
 
 _cfg = get_config()
 
@@ -58,11 +64,118 @@ _laptime_features = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_features.p
 
 _metrics: dict = {}
 _metrics_path = _cfg.paths.models_dir / "metrics.json"
-if _metrics_path.exists():
+
+
+def _reload_metrics() -> None:
+    global _metrics
+    if _metrics_path.exists():
+        try:
+            _metrics = json.loads(_metrics_path.read_text())
+        except Exception as e:
+            logger.warning("Could not load metrics.json: %s", e)
+
+
+def _reload_models() -> None:
+    """Re-read model pickles + metrics from disk (e.g. after a /pipeline/train job)."""
+    global win_model, laptime_pipeline, race_model, _laptime_features
+    win_model = _load_pickle(_cfg.paths.models_dir / "xgb_racewin_pipeline.pkl")
+    laptime_pipeline = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_pipeline.pkl")
+    race_model = _load_pickle(_cfg.paths.models_dir / "race_prediction_pipeline.pkl")
+    _laptime_features = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_features.pkl")
+    _reload_metrics()
+    logger.info("Models reloaded from disk.")
+
+
+_reload_metrics()
+
+
+# ---------------------------------------------------------------------------
+# Background job runner for pipeline stages (fetch/clean/features/train/...)
+# ---------------------------------------------------------------------------
+
+_executor = ThreadPoolExecutor(max_workers=1)  # single worker: pipeline jobs write shared files
+_jobs: dict[str, dict] = {}
+_JOB_HISTORY_LIMIT = 50
+
+
+def _active_job_id() -> Optional[str]:
+    for job_id, job in _jobs.items():
+        if job["status"] in ("queued", "running"):
+            return job_id
+    return None
+
+
+def _run_job(job_id: str, fn, *args, **kwargs) -> None:
+    job = _jobs[job_id]
+    job["status"] = "running"
+    job["started_at"] = datetime.now().isoformat()
     try:
-        _metrics = json.loads(_metrics_path.read_text())
+        result = fn(*args, **kwargs)
+        job["status"] = "success"
+        job["result"] = result
     except Exception as e:
-        logger.warning("Could not load metrics.json: %s", e)
+        logger.error("Pipeline job %s (%s) failed: %s", job_id, job["kind"], e)
+        job["status"] = "failed"
+        job["error"] = str(e)
+    finally:
+        job["finished_at"] = datetime.now().isoformat()
+
+
+def _submit_job(kind: str, fn, *args, **kwargs) -> str:
+    active = _active_job_id()
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A pipeline job is already in progress ({_jobs[active]['kind']}, id={active}). "
+                   f"Wait for it to finish or check GET /jobs/{active}.",
+        )
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {
+        "id": job_id,
+        "kind": kind,
+        "status": "queued",
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+        "result": None,
+    }
+    # Trim history so the in-memory dict doesn't grow unbounded
+    if len(_jobs) > _JOB_HISTORY_LIMIT:
+        oldest = sorted(_jobs.values(), key=lambda j: j["id"])[0]["id"]
+        if oldest != job_id:
+            del _jobs[oldest]
+    _executor.submit(_run_job, job_id, fn, *args, **kwargs)
+    return job_id
+
+
+class JobSubmitted(BaseModel):
+    job_id: str
+    status: str
+
+
+class JobStatus(BaseModel):
+    id: str
+    kind: str
+    status: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    error: Optional[str] = None
+    result: Optional[dict] = None
+
+
+@app.get("/jobs", response_model=list[JobStatus], tags=["pipeline"])
+def list_jobs():
+    """List recent pipeline jobs, most recently created first."""
+    return list(reversed(list(_jobs.values())))
+
+
+@app.get("/jobs/{job_id}", response_model=JobStatus, tags=["pipeline"])
+def get_job(job_id: str):
+    """Poll the status of a pipeline job."""
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job
 
 
 class RaceInput(BaseModel):
@@ -80,7 +193,7 @@ class RaceInput(BaseModel):
 def predict(race: RaceInput):
     """Predict race winner probability."""
     if win_model is None:
-        raise HTTPException(status_code=503, detail="Race win model not loaded. Run: python main.py train --model racewin")
+        raise HTTPException(status_code=503, detail="Race win model not loaded. Run: POST /pipeline/train {'model': 'racewin'}")
     try:
         input_data = race.model_dump()
         df = pd.DataFrame([input_data])
@@ -144,7 +257,7 @@ _DEFAULT_LAPTIME = 95.0
 def predict_laptime(lap: LapTimeInput):
     """Predict lap time (auto-computes derived fields if not provided)."""
     if laptime_pipeline is None:
-        raise HTTPException(status_code=503, detail="Lap time model not loaded. Run: python main.py train --model laptime")
+        raise HTTPException(status_code=503, detail="Lap time model not loaded. Run: POST /pipeline/train {'model': 'laptime'}")
     try:
         d = lap.model_dump()
         compound = lap.TireCompound.upper()
@@ -213,7 +326,7 @@ async def predict_next_race(
 ):
     """Predict next race positions for all drivers."""
     if race_model is None:
-        raise HTTPException(status_code=503, detail="Race position model not loaded. Run: python main.py train --model position")
+        raise HTTPException(status_code=503, detail="Race position model not loaded. Run: POST /pipeline/train {'model': 'position'}")
     try:
         results_path = _cfg.paths.data_dir / "f1_results_features.csv"
         try:
@@ -221,7 +334,7 @@ async def predict_next_race(
         except FileNotFoundError:
             raise HTTPException(
                 status_code=404,
-                detail="Results data not found. Run: python main.py features",
+                detail="Results data not found. Run: POST /pipeline/features",
             )
 
         season = _cfg.pipeline.season
@@ -373,3 +486,102 @@ def health():
         }
     except Exception as e:
         return {"status": "degraded", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline management — run data/training stages as background jobs, polled
+# via GET /jobs/{job_id}. Replaces the old CLI subcommands.
+# ---------------------------------------------------------------------------
+
+TrainModel = Literal["laptime", "racewin", "position", "all"]
+
+
+class TrainRequest(BaseModel):
+    model: TrainModel = "all"
+
+
+class RaceRoundRequest(BaseModel):
+    race: Optional[int] = Field(default=None, description="Race round number. Auto-detects if omitted.")
+
+
+def _job_train(model: TrainModel) -> dict:
+    run_training(_cfg, models=[model])
+    _reload_models()
+    trained = ["laptime", "racewin", "position"] if model == "all" else [model]
+    return {"trained": trained, "metrics": {k: _metrics.get(k) for k in trained}}
+
+
+def _job_evaluate_laptime(race: Optional[int]) -> dict:
+    results = _evaluate_laptime(_cfg, race_round=race)
+    abs_error = (results["Predicted_seconds"] - results["Actual_seconds"]).abs()
+    return {
+        "race_round": race,
+        "laps_evaluated": int(len(results)),
+        "mae": round(float(abs_error.mean()), 3),
+    }
+
+
+def _job_run_all() -> dict:
+    run_fetch(_cfg)
+    run_cleaning(_cfg)
+    run_feature_engineering(_cfg)
+    run_training(_cfg)
+    _reload_models()
+    qualifying_fetched = True
+    try:
+        fetch_upcoming_qualifying(_cfg)
+    except Exception as e:
+        logger.warning("run-all: fetch-qualifying skipped: %s", e)
+        qualifying_fetched = False
+    return {"trained": ["laptime", "racewin", "position"], "qualifying_fetched": qualifying_fetched}
+
+
+@app.post("/pipeline/fetch", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_fetch():
+    """Fetch raw F1 data from the fastf1 API and save raw CSVs. Runs as a background job."""
+    job_id = _submit_job("fetch", run_fetch, _cfg)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/clean", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_clean():
+    """Clean and preprocess raw CSV data. Runs as a background job."""
+    job_id = _submit_job("clean", run_cleaning, _cfg)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/features", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_features():
+    """Run feature engineering on cleaned data. Runs as a background job."""
+    job_id = _submit_job("features", run_feature_engineering, _cfg)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/train", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_train(req: TrainRequest):
+    """Train ML model(s) and save pipelines to models/. Reloads the API's in-memory
+    models automatically once the job succeeds. Runs as a background job."""
+    job_id = _submit_job("train", _job_train, req.model)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/fetch-qualifying", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_fetch_qualifying(req: RaceRoundRequest):
+    """Fetch qualifying results for the next (or given) race. Runs as a background job."""
+    job_id = _submit_job("fetch-qualifying", fetch_upcoming_qualifying, _cfg, race_round=req.race)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/evaluate-laptime", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_evaluate_laptime(req: RaceRoundRequest):
+    """Compare predicted vs actual lap times for a completed race. Runs as a background job."""
+    job_id = _submit_job("evaluate-laptime", _job_evaluate_laptime, req.race)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/run-all", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_run_all():
+    """Run the full pipeline: fetch -> clean -> features -> train -> fetch-qualifying.
+    Runs as a single background job."""
+    job_id = _submit_job("run-all", _job_run_all)
+    return {"job_id": job_id, "status": "queued"}
