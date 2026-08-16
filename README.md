@@ -1,16 +1,15 @@
 # F1 Race Prediction System
 
-A machine learning system for predicting Formula 1 race outcomes. Uses XGBoost models trained on FastF1 telemetry data, served through a FastAPI REST API. The entire workflow — data fetching through race-day prediction — runs from a single CLI.
+A machine learning system for predicting Formula 1 race outcomes. Uses XGBoost models trained on FastF1 telemetry data, served through a FastAPI REST API. The entire workflow — data fetching through race-day prediction — is driven through Swagger UI (`/docs`); there is no pipeline CLI.
 
 ## Project Structure
 
 ```
 F1_predictor/
-├── main.py                     # CLI entry point (run everything from here)
-├── app.py                      # FastAPI prediction server
+├── main.py                     # Starts the API server (python main.py serve)
+├── app.py                      # FastAPI server: predictions + pipeline endpoints
 ├── config.yaml                 # Central config: paths, season, constants, hyperparameters
-├── requirements.txt            # Production dependencies
-├── requirements-dev.txt        # Dev/test dependencies (jupyter, pytest, etc.)
+├── requirements.txt            # All dependencies (API, pipeline, plotting, tests)
 ├── Dockerfile                  # Container image for production deployment
 ├── docker-compose.yml          # Docker Compose service definition
 │
@@ -63,72 +62,46 @@ F1_predictor/
 git clone <repository-url>
 cd F1_predictor
 
-# Production
 pip install -r requirements.txt
-
-# Development (includes jupyter, pytest, matplotlib)
-pip install -r requirements-dev.txt
 ```
 
 ## Race Weekend Routine
 
-This is the week-to-week workflow once the system is set up.
+Start the server once — `python main.py serve` — then do everything else through Swagger UI at `http://localhost:8000/docs`. Every pipeline stage below is a `POST /pipeline/...` call there.
 
 **Saturday — after qualifying:**
-```bash
-python main.py fetch-qualifying
-```
-Fetches real grid positions from today's qualifying session and saves them to `data/upcoming_qualifying.csv`. The prediction endpoint and CLI command automatically use these instead of historical averages.
+
+`POST /pipeline/fetch-qualifying` (body `{"race": null}` to auto-detect the round). Fetches real grid positions from today's qualifying session and saves them to `data/upcoming_qualifying.csv`. `GET /predict_next_race` automatically uses these instead of historical averages once the job finishes.
 
 **Sunday — before the race:**
-```bash
-# Terminal output (no server needed)
-python main.py predict
 
-# Or via the API
-python main.py serve
-curl -s http://localhost:8000/predict_next_race | python -m json.tool
-```
+`GET /predict_next_race` (optionally with `?lookback_races=`) — returns predicted finishing positions for all drivers.
 
 **Sunday — after the race:**
-```bash
-python main.py run-all
-```
-Ingests the completed race, retrains all models on the updated season data, and attempts to fetch qualifying for the next race weekend. By Monday the system is ready for the following round.
 
-## All CLI Commands
+`POST /pipeline/run-all`. Ingests the completed race, retrains all models on the updated season data, and attempts to fetch qualifying for the next race weekend. By Monday the system is ready for the following round.
 
-```bash
-# Full pipeline (fetch → clean → features → train → fetch-qualifying)
-python main.py run-all
+## Pipeline Endpoints (Swagger UI)
 
-# Individual pipeline stages
-python main.py fetch                         # Pull completed race data from FastF1
-python main.py clean                         # Clean raw CSVs + save data health plots
-python main.py features                      # Engineer features + save insight plots
-python main.py train                         # Train all three models
-python main.py train --model laptime         # Train a specific model only
-python main.py train --model racewin
-python main.py train --model position
+All pipeline stages run as **background jobs** — the `POST` call returns immediately with a `job_id`; poll `GET /jobs/{job_id}` (or `GET /jobs` for the full list) to see `queued` → `running` → `success`/`failed`. Only one pipeline job can run at a time — a second `POST` while one is in flight returns `409 Conflict`, since jobs write to the same data/model files.
 
-# Qualifying and prediction
-python main.py fetch-qualifying              # Fetch qualifying for the next race (auto-detects round)
-python main.py fetch-qualifying --race 8     # Fetch qualifying for a specific round
-python main.py predict                       # Print predicted race finishing order to terminal
-python main.py predict --lookback 8         # Use a custom form window (default: config value)
+| Endpoint | Body | What it does |
+|---|---|---|
+| `POST /pipeline/run-all` | — | Full pipeline: fetch → clean → features → train → fetch-qualifying (qualifying step is non-fatal) |
+| `POST /pipeline/fetch` | — | Pull completed race data from FastF1 |
+| `POST /pipeline/clean` | — | Clean raw CSVs + save data health plots |
+| `POST /pipeline/features` | — | Engineer features + save insight plots |
+| `POST /pipeline/train` | `{"model": "laptime"\|"racewin"\|"position"\|"all"}` | Train model(s); the API's in-memory models auto-reload on success — no restart needed |
+| `POST /pipeline/fetch-qualifying` | `{"race": <round>\|null}` | Fetch qualifying for a race (auto-detects next round if `null`) |
+| `POST /pipeline/evaluate-laptime` | `{"race": <round>\|null}` | Compare predicted vs actual lap times for a completed race (defaults to most recent) |
+| `GET /jobs` | — | List recent jobs, most recent first |
+| `GET /jobs/{job_id}` | — | Poll a single job's status/result/error |
 
-# Evaluation
-python main.py evaluate-laptime              # Compare predicted vs actual (most recent race)
-python main.py evaluate-laptime --race 3     # Evaluate a specific round
-
-# Serve the prediction API
-python main.py serve
-python main.py serve --port 8080 --reload    # Dev mode with auto-reload
-```
+To switch seasons, change `season:` in `config.yaml` and run `POST /pipeline/run-all`.
 
 ## How Predictions Work
 
-### `predict` CLI and `GET /predict_next_race`
+### `GET /predict_next_race`
 
 Builds a per-driver feature set from their last N completed races — rolling averages of finishing position, wins, podiums, DNF rate, qualifying performance, and form trend — and feeds it into the race position model (XGBoost regressor).
 
@@ -203,7 +176,7 @@ models:
     ...
 ```
 
-To switch seasons, change `season:` in `config.yaml` and run `python main.py run-all`.
+To switch seasons, change `season:` in `config.yaml` and run `POST /pipeline/run-all`.
 
 ## Models
 
@@ -306,9 +279,9 @@ All endpoints return HTTP 503 with an actionable message if the relevant model i
 
 ## Automated Visualizations
 
-Running `clean` or `features` automatically saves diagnostic PNGs to `outputs/plots/`.
+Running `POST /pipeline/clean` or `POST /pipeline/features` automatically saves diagnostic PNGs to `outputs/plots/`.
 
-**After `python main.py clean` → `outputs/plots/cleaning/`**
+**After `POST /pipeline/clean` → `outputs/plots/cleaning/`**
 
 | File | What it shows |
 |------|---------------|
@@ -317,7 +290,7 @@ Running `clean` or `features` automatically saves diagnostic PNGs to `outputs/pl
 | `missing_data_heatmap.png` | % missing per column per race before cleaning |
 | `data_completeness.png` | Lap count retained per Grand Prix weekend |
 
-**After `python main.py features` → `outputs/plots/features/`**
+**After `POST /pipeline/features` → `outputs/plots/features/`**
 
 | File | What it shows |
 |------|---------------|
@@ -327,7 +300,7 @@ Running `clean` or `features` automatically saves diagnostic PNGs to `outputs/pl
 | `race_phase_distribution.png` | Lap count by Early / Middle / Late phase |
 | `team_reliability.png` | % races finished per team |
 
-**After `python main.py evaluate-laptime` → `outputs/plots/evaluation/`**
+**After `POST /pipeline/evaluate-laptime` → `outputs/plots/evaluation/`**
 
 | File | What it shows |
 |------|---------------|

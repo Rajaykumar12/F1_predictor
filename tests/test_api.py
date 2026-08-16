@@ -133,3 +133,76 @@ def test_predict_laptime_valid_input():
     data = response.json()
     assert "predicted_laptime_seconds" in data
     assert data["predicted_laptime_seconds"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Pipeline job endpoints
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+import app as app_module
+
+
+@pytest.fixture(autouse=True)
+def _clear_jobs():
+    """Ensure each test starts with no in-flight job (the executor has 1 worker,
+    so a leftover 'running' job would 409 every subsequent submission)."""
+    app_module._jobs.clear()
+    yield
+    app_module._jobs.clear()
+
+
+def _wait_for_job(job_id: str, timeout: float = 5.0) -> dict:
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        job = app_module._jobs[job_id]
+        if job["status"] in ("success", "failed"):
+            return job
+        _time.sleep(0.02)
+    raise TimeoutError(f"job {job_id} did not finish in {timeout}s")
+
+
+def test_pipeline_fetch_submits_job(monkeypatch):
+    monkeypatch.setattr(app_module, "run_fetch", lambda cfg: None)
+    response = client.post("/pipeline/fetch")
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "queued"
+    job = _wait_for_job(data["job_id"])
+    assert job["status"] == "success"
+
+
+def test_pipeline_rejects_concurrent_job(monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def _slow_fetch(cfg):
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(app_module, "run_fetch", _slow_fetch)
+    try:
+        first = client.post("/pipeline/fetch")
+        assert first.status_code == 202
+
+        second = client.post("/pipeline/clean")
+        assert second.status_code == 409
+    finally:
+        release.set()
+        _wait_for_job(first.json()["job_id"])
+
+
+def test_job_status_404_for_unknown_id():
+    response = client.get("/jobs/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_pipeline_train_reloads_models(monkeypatch):
+    monkeypatch.setattr(app_module, "run_training", lambda cfg, models=None: None)
+    monkeypatch.setattr(app_module, "_reload_models", lambda: None)
+    response = client.post("/pipeline/train", json={"model": "racewin"})
+    assert response.status_code == 202
+    job = _wait_for_job(response.json()["job_id"])
+    assert job["status"] == "success"
+    assert job["result"]["trained"] == ["racewin"]

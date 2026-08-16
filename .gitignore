@@ -69,3 +69,8 @@ desktop.ini
 *.log
 *.tmp
 *.bak
+# Added by code-review-graph
+.code-review-graph/
+CLAUDE.md
+.mcp.json
+.claude
