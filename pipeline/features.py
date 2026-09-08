@@ -75,7 +75,7 @@ def _compute_team_reliability(
         completed_statuses = ["Finished"]
     return (
         results.groupby("Team")["Status"]
-        .apply(lambda x: x.isin(completed_statuses).mean() * 100, include_groups=False)
+        .apply(lambda x: x.isin(completed_statuses).mean() * 100)
         .rename("team_reliability")
     )
 
@@ -108,14 +108,28 @@ def create_historical_features(
     df: pd.DataFrame,
     n_previous: int = 6,
     completed_statuses: List[str] | None = None,
+    as_of_round: int | None = None,
 ) -> pd.DataFrame:
-    """Compute per-driver rolling statistics over the previous n_previous races."""
+    """Compute per-driver rolling statistics over the previous n_previous races.
+
+    When ``as_of_round`` is given, each driver's history is truncated to races
+    with ``Race <= as_of_round`` before the rolling windows are computed. This
+    yields an honest "form going into round ``as_of_round`` + 1" row without
+    physically editing the source CSVs. Default (``None``) leaves behaviour and
+    row order unchanged.
+    """
     if completed_statuses is None:
         completed_statuses = ["Finished"]
 
     frames = []
     for driver in df["Driver"].unique():
         d = df[df["Driver"] == driver].copy().reset_index(drop=True)
+
+        if as_of_round is not None and "Race" in d.columns:
+            d = d.sort_values("Race").reset_index(drop=True)
+            d = d[d["Race"] <= as_of_round].reset_index(drop=True)
+            if d.empty:
+                continue
 
         d["avg_position_last"] = d["Position"].rolling(n_previous, min_periods=1).mean()
         d["best_position_last"] = d["Position"].rolling(n_previous, min_periods=1).min()
