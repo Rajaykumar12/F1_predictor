@@ -15,6 +15,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from pipeline.config_loader import Config, get_config
 from pipeline.features import create_historical_features
+from pipeline.model_registry import MODEL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -248,14 +249,9 @@ def train_position_model(config: Config) -> None:
     with open(models_dir / "race_prediction_pipeline.pkl", "wb") as f:
         pickle.dump(pipeline, f)
 
-    feature_info = {
-        "n_features": len(available),
-        "lookback_races": n_prev,
-        "features": available,
-        "has_qualifying": "avg_quali_time" in available,
-    }
-    with open(models_dir / "race_position_feature_info.pkl", "wb") as f:
-        pickle.dump(feature_info, f)
+    # The feature list lives inside the fitted pipeline's ColumnTransformer;
+    # pipeline.model_registry.model_feature_columns() reads it back at predict
+    # and evaluate time, so it isn't persisted separately.
 
     _save_metrics(models_dir, "position", {
         "mae": round(holdout_mae, 4),
@@ -276,7 +272,7 @@ def run_training(config: Config | None = None, models: list[str] | None = None) 
     if config is None:
         config = get_config()
     if models is None or "all" in models:
-        models = ["laptime", "racewin", "position"]
+        models = list(MODEL_NAMES)
 
     dispatchers = {
         "laptime": train_laptime_model,
