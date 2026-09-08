@@ -1,0 +1,309 @@
+"""Model feedback loop: prediction logging, post-race scoring, rolling
+drift scorecard, and per-driver bias correction.
+
+All functions here are pure or narrow-IO so they unit-test with synthetic
+frames (see tests/test_feedback.py). Orchestration that ties them to the
+pipeline lives in pipeline/orchestrate.py.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy.stats import spearmanr
+
+logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Scoring — lifted from scripts/backtest_monza.py:score()
+# --------------------------------------------------------------------------- #
+def _overlap(a, b) -> int:
+    return len(set(a) & set(b))
+
+
+def score_prediction(pred_df: pd.DataFrame, actual_df: pd.DataFrame) -> dict:
+    """Score a predicted finishing order against the actual result.
+
+    pred_df   : columns PredRank (int), Driver, PredictedPosition (float)
+    actual_df : columns Driver, Position   (from f1_results_simple.csv, Race == N)
+    """
+    actual = actual_df.copy()
+    actual["Position"] = pd.to_numeric(actual["Position"], errors="coerce")
+    actual = actual.dropna(subset=["Position"])
+    actual_order = actual.sort_values("Position")[["Driver", "Position"]]
+
+    merged = pred_df.merge(actual_order, on="Driver", how="inner")
+    merged["AbsError"] = (merged["PredRank"] - merged["Position"]).abs()
+
+    pred_order = pred_df.sort_values("PredictedPosition")["Driver"].tolist()
+    act_order = actual_order["Driver"].tolist()
+
+    winner_correct = bool(pred_order and act_order and pred_order[0] == act_order[0])
+
+    pred_podium, act_podium = pred_order[:3], act_order[:3]
+    podium_overlap = _overlap(pred_podium, act_podium)
+    podium_exact = int(sum(p == a for p, a in zip(pred_podium, act_podium)))
+
+    top5 = _overlap(pred_order[:5], act_order[:5])
+    top10 = _overlap(pred_order[:10], act_order[:10])
+
+    if len(merged) >= 3:
+        rho, _ = spearmanr(merged["PredRank"], merged["Position"])
+        mae = float(merged["AbsError"].mean())
+        rmse = float(np.sqrt((merged["AbsError"] ** 2).mean()))
+        rho = float(rho)
+    else:
+        rho = mae = rmse = float("nan")
+
+    unmatched = sorted(set(pred_df["Driver"]) - set(actual_order["Driver"]))
+
+    return {
+        "winner_correct": winner_correct,
+        "podium_overlap": podium_overlap,
+        "podium_exact": podium_exact,
+        "top5": top5,
+        "top10": top10,
+        "spearman": rho,
+        "position_mae": mae,
+        "position_rmse": rmse,
+        "n_drivers": int(len(merged)),
+        "unmatched": unmatched,
+    }
+
+
+def per_driver_errors(pred_df: pd.DataFrame, actual_df: pd.DataFrame) -> list[dict]:
+    """Signed rank error per driver. Positive = model placed them too low."""
+    actual = actual_df.copy()
+    actual["Position"] = pd.to_numeric(actual["Position"], errors="coerce")
+    actual = actual.dropna(subset=["Position"])[["Driver", "Position"]]
+    merged = pred_df.merge(actual, on="Driver", how="inner")
+    out = []
+    for _, r in merged.iterrows():
+        out.append({
+            "driver": str(r["Driver"]),
+            "pred_rank": int(r["PredRank"]),
+            "actual_position": int(r["Position"]),
+            "signed_error": int(r["PredRank"] - r["Position"]),
+        })
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Stores
+# --------------------------------------------------------------------------- #
+def load_history(path) -> list[dict]:
+    path = Path(path)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, list) else []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not read score history %s: %s", path, e)
+        return []
+
+
+def append_history(path, record: dict) -> None:
+    """Append a score record. If one already exists for the same (season, round),
+    it is replaced in place so re-scoring a race doesn't double-count it."""
+    path = Path(path)
+    history = load_history(path)
+    key = (record.get("season"), record.get("round"))
+    if key != (None, None):
+        history = [h for h in history if (h.get("season"), h.get("round")) != key]
+    history.append(record)
+    history.sort(key=lambda h: (h.get("season", 0), h.get("round", 0)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(history, indent=2))
+
+
+def prediction_log_path(cfg, season: int, round_no: int) -> Path:
+    return cfg.feedback.prediction_log_dir / f"{season}_r{int(round_no):02d}.json"
+
+
+def _forecast_to_dict(f) -> dict:
+    return {
+        "pred_rank": f.pred_rank,
+        "driver": f.driver,
+        "team": f.team,
+        "predicted_position": f.predicted_position,
+        "raw_predicted_position": f.raw_predicted_position,
+        "confidence": f.confidence,
+        "recent_form": f.recent_form,
+    }
+
+
+def _model_trained_at(cfg) -> str | None:
+    path = cfg.paths.models_dir / "metrics.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text()).get("position", {}).get("trained_at")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_prediction_log(cfg, result, round_no: int) -> Path:
+    """Persist a PredictionResult so it can be scored after the race."""
+    season = cfg.pipeline.season
+    path = prediction_log_path(cfg, season, round_no)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "season": season,
+        "round": int(round_no),
+        "race_label": result.race_label,
+        "lookback": result.lookback,
+        "as_of_round": result.as_of_round,
+        "predicted_at": result.prediction_date,
+        "model_trained_at": _model_trained_at(cfg),
+        "model_r2": result.model_r2,
+        "using_real_qualifying": result.using_real_qualifying,
+        "bias_applied": result.bias_applied or None,
+        "forecasts": [_forecast_to_dict(f) for f in result.forecasts],
+        "scored": None,
+    }
+    path.write_text(json.dumps(payload, indent=2))
+    return path
+
+
+def load_prediction_log(cfg, round_no: int) -> dict | None:
+    path = prediction_log_path(cfg, cfg.pipeline.season, round_no)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not read prediction log %s: %s", path, e)
+        return None
+
+
+def update_prediction_log_scored(cfg, round_no: int, scored: dict) -> None:
+    log = load_prediction_log(cfg, round_no)
+    if log is None:
+        raise FileNotFoundError(f"No prediction log for round {round_no}")
+    log["scored"] = scored
+    path = prediction_log_path(cfg, cfg.pipeline.season, round_no)
+    path.write_text(json.dumps(log, indent=2))
+
+
+def list_prediction_logs(cfg) -> list[dict]:
+    d = cfg.feedback.prediction_log_dir
+    if not d.exists():
+        return []
+    logs = []
+    for p in sorted(d.glob(f"{cfg.pipeline.season}_r*.json")):
+        try:
+            logs.append(json.loads(p.read_text()))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Skipping unreadable prediction log %s: %s", p, e)
+    logs.sort(key=lambda x: x.get("round", 0))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
+# Rolling scorecard + drift
+# --------------------------------------------------------------------------- #
+def _nanmean(values) -> float:
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return float("nan")
+    return float(np.nanmean(vals))
+
+
+def rolling_scorecard(history: list[dict], window: int) -> dict:
+    recent = history[-window:] if window > 0 else list(history)
+    if not recent:
+        return {"races": 0}
+    return {
+        "races": len(recent),
+        "winner_hit_rate": _nanmean([1.0 if r.get("winner_correct") else 0.0 for r in recent]),
+        "podium_overlap_avg": _nanmean([r.get("podium_overlap") for r in recent]),
+        "top5_avg": _nanmean([r.get("top5") for r in recent]),
+        "top10_avg": _nanmean([r.get("top10") for r in recent]),
+        "spearman_avg": _nanmean([r.get("spearman") for r in recent]),
+        "position_mae_avg": _nanmean([r.get("position_mae") for r in recent]),
+        "position_rmse_avg": _nanmean([r.get("position_rmse") for r in recent]),
+    }
+
+
+def should_retrain(history: list[dict], fb) -> tuple[bool, list[str]]:
+    if not fb.enabled:
+        return False, ["feedback disabled"]
+    if len(history) < fb.min_scored_races:
+        return False, [f"only {len(history)} scored race(s); need {fb.min_scored_races}"]
+
+    card = rolling_scorecard(history, fb.window_races)
+    reasons: list[str] = []
+
+    mae = card.get("position_mae_avg")
+    if mae is not None and not np.isnan(mae) and mae > fb.max_position_mae:
+        reasons.append(f"rolling position MAE {mae:.2f} > {fb.max_position_mae}")
+
+    rho = card.get("spearman_avg")
+    if rho is not None and not np.isnan(rho) and rho < fb.min_spearman:
+        reasons.append(f"rolling Spearman {rho:.2f} < {fb.min_spearman}")
+
+    whr = card.get("winner_hit_rate")
+    if whr is not None and not np.isnan(whr) and whr < fb.min_winner_hit_rate:
+        reasons.append(f"rolling winner hit-rate {whr:.2f} < {fb.min_winner_hit_rate}")
+
+    return (len(reasons) > 0), reasons
+
+
+# --------------------------------------------------------------------------- #
+# Per-driver bias correction (exp-weighted signed error)
+# --------------------------------------------------------------------------- #
+def driver_bias(scored_rounds: list[dict], halflife: float, max_abs: float) -> dict[str, float]:
+    """Exp-weighted mean signed rank error per driver, clipped to +/- max_abs.
+
+    scored_rounds : chronological list of {"round": int,
+                    "per_driver": [{"driver", "signed_error"}, ...]}
+    weight for a round k positions before the latest = 0.5 ** (k / halflife)
+    """
+    if not scored_rounds:
+        return {}
+    ordered = sorted(scored_rounds, key=lambda r: r.get("round", 0))
+    latest_idx = len(ordered) - 1
+
+    acc: dict[str, list[tuple[float, float]]] = {}
+    for i, rnd in enumerate(ordered):
+        k = latest_idx - i
+        w = 0.5 ** (k / halflife)
+        for pd_row in rnd.get("per_driver", []):
+            drv = pd_row["driver"]
+            acc.setdefault(drv, []).append((w, float(pd_row["signed_error"])))
+
+    bias: dict[str, float] = {}
+    for drv, pairs in acc.items():
+        wsum = sum(w for w, _ in pairs)
+        if wsum <= 0:
+            continue
+        est = sum(w * e for w, e in pairs) / wsum
+        bias[drv] = float(np.clip(est, -max_abs, max_abs))
+    return bias
+
+
+def apply_bias_correction(forecasts: list, bias: dict[str, float]) -> list:
+    """Return a re-ranked copy of forecasts with bias subtracted from raw positions."""
+    if not bias:
+        return list(forecasts)
+    adjusted = []
+    for f in forecasts:
+        delta = bias.get(f.driver, 0.0)
+        new_pos = max(1.0, round(f.raw_predicted_position - delta, 2))
+        adjusted.append(replace(f, predicted_position=new_pos))
+    adjusted.sort(key=lambda f: f.predicted_position)
+    for rank, f in enumerate(adjusted, start=1):
+        f.pred_rank = rank
+    return adjusted
+
+
+def now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")

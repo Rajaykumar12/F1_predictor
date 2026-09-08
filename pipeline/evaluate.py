@@ -10,7 +10,8 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from pipeline.config_loader import Config, get_config
+from pipeline.config_loader import Config
+from pipeline.features import create_historical_features
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,135 @@ def evaluate_laptime(config: Config, race_round: int | None = None) -> pd.DataFr
     _save_evaluation_plots(results, race_round, config.pipeline.season, mae, r2, plots_dir)
 
     return results
+
+
+def evaluate_position(config: Config, race_round: int | None = None) -> pd.DataFrame:
+    """Compare the position model's predicted finishing order vs the actual result
+    for a completed race. Mirrors ``evaluate_laptime``.
+
+    NOTE: this is a post-hoc audit of a race that already happened — it does NOT
+    apply an ``as_of_round`` cutoff, so the unshifted rolling-window inflation is
+    present (and noted). Use ``scripts/backtest.py`` for an honest held-out score.
+    """
+    import pickle
+
+    from pipeline.feedback import score_prediction
+
+    data_dir = config.paths.data_dir
+    models_dir = config.paths.models_dir
+    plots_dir = config.paths.plots_dir / "evaluation"
+    season = config.pipeline.season
+
+    results_df = pd.read_csv(data_dir / "f1_results_features.csv")
+    season_df = results_df[results_df["Year"] == season].copy()
+    available_races = sorted(int(r) for r in season_df["Race"].unique())
+    if not available_races:
+        raise RuntimeError("No results feature data found. Run: python main.py features")
+
+    if race_round is None:
+        race_round = available_races[-1]
+        logger.info("No race specified — defaulting to most recent: Round %d", race_round)
+    if race_round not in available_races:
+        raise ValueError(
+            f"Round {race_round} not in data. Available rounds: {available_races}"
+        )
+
+    processed = create_historical_features(
+        season_df,
+        n_previous=config.pipeline.lookback_races,
+        completed_statuses=config.constants.completed_statuses,
+    )
+    rows = (
+        processed[processed["Race"] == race_round]
+        .groupby("Driver")
+        .last()
+        .reset_index()
+    )
+    rows = rows[rows["avg_position_last"].notna()].reset_index(drop=True)
+    if rows.empty:
+        raise RuntimeError(f"No usable driver rows for Round {race_round}.")
+
+    with open(models_dir / "race_prediction_pipeline.pkl", "rb") as f:
+        model = pickle.load(f)
+
+    from pipeline.model_registry import model_feature_columns
+
+    feature_cols = model_feature_columns(model)
+    missing = [c for c in feature_cols if c not in rows.columns]
+    if missing:
+        raise RuntimeError(f"Missing feature columns in data: {missing}")
+
+    y_pred = model.predict(rows[feature_cols])
+
+    out = rows[["Driver", "Team", "GridPosition", "Position"]].copy()
+    out = out.rename(columns={"Position": "ActualPosition"})
+    out["PredictedPosition"] = np.round(y_pred, 2)
+    out = out.sort_values("PredictedPosition").reset_index(drop=True)
+    out["PredRank"] = out.index + 1
+    out["Error"] = np.round(out["PredRank"] - out["ActualPosition"], 2)
+    out["AbsError"] = out["Error"].abs()
+
+    metrics = score_prediction(
+        out[["PredRank", "Driver", "PredictedPosition"]],
+        out[["Driver"]].assign(Position=out["ActualPosition"]),
+    )
+
+    print(f"\n{'='*65}")
+    print(f"  Finishing-Position Evaluation — Round {race_round} ({season} Season)")
+    print(f"{'='*65}")
+    print(f"  Drivers evaluated : {metrics['n_drivers']}")
+    print(f"  Winner correct    : {metrics['winner_correct']}")
+    print(f"  Podium overlap    : {metrics['podium_overlap']}/3   (exact {metrics['podium_exact']}/3)")
+    print(f"  Top-5 / Top-10    : {metrics['top5']}/5   {metrics['top10']}/10")
+    print(f"  Spearman          : {metrics['spearman']:.3f}")
+    print(f"  Position MAE      : {metrics['position_mae']:.2f}   RMSE {metrics['position_rmse']:.2f}")
+    print(f"{'='*65}")
+    print("\nPer-Driver (sorted by abs error):")
+    print(
+        out.sort_values("AbsError", ascending=False)[
+            ["PredRank", "Driver", "Team", "PredictedPosition", "ActualPosition", "Error"]
+        ].to_string(index=False)
+    )
+    print("\n  (post-hoc audit — rolling-window features include the race itself;")
+    print("   see scripts/backtest.py for an honest held-out score.)")
+
+    _save_position_eval_plots(out, race_round, season, metrics, plots_dir)
+    return out
+
+
+def _save_position_eval_plots(out, race_round, season, metrics, plots_dir) -> None:
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(out["ActualPosition"], out["PredRank"], color="steelblue", s=30)
+        lim = [0, max(out["ActualPosition"].max(), out["PredRank"].max()) + 1]
+        ax.plot(lim, lim, "r--", linewidth=1, label="Perfect")
+        for _, r in out.iterrows():
+            ax.annotate(str(r["Driver"]), (r["ActualPosition"], r["PredRank"]), fontsize=7)
+        ax.set_xlabel("Actual finishing position")
+        ax.set_ylabel("Predicted rank")
+        ax.set_title(
+            f"Predicted vs Actual — Round {race_round} ({season})\n"
+            f"MAE={metrics['position_mae']:.2f}  Spearman={metrics['spearman']:.3f}"
+        )
+        ax.legend()
+        fig.savefig(plots_dir / f"position_round{race_round}_pred_vs_actual.png", bbox_inches="tight", dpi=120)
+        plt.close(fig)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Skipping position pred-vs-actual plot: %s", e)
+
+    try:
+        ordered = out.sort_values("PredRank")
+        fig, ax = plt.subplots(figsize=(8, max(4, len(ordered) * 0.35)))
+        ax.barh(ordered["Driver"].astype(str), ordered["Error"], color="coral")
+        ax.axvline(0, color="black", linestyle="--", linewidth=1)
+        ax.set_xlabel("Rank error (predicted rank − actual position)")
+        ax.set_title(f"Per-Driver Rank Error — Round {race_round} ({season})")
+        ax.invert_yaxis()
+        fig.savefig(plots_dir / f"position_round{race_round}_rank_error.png", bbox_inches="tight", dpi=120)
+        plt.close(fig)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Skipping position rank-error plot: %s", e)
 
 
 def _save_evaluation_plots(
