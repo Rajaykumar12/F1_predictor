@@ -33,6 +33,20 @@ api:
     - "*"
   data_freshness_hours: 48
 
+feedback:
+  enabled: true
+  window_races: 5           # rolling window (races) for the drift scorecard
+  min_scored_races: 5       # need this many scored races before drift / bias act
+  max_position_mae: 4.0     # drift if rolling mean |pred rank - actual pos| exceeds this
+  min_spearman: 0.30        # drift if rolling mean rank correlation drops below this
+  min_winner_hit_rate: 0.15 # drift if rolling winner-correct rate drops below this
+  auto_retrain: false       # true = score-race retrains automatically on drift
+  bias_correction_enabled: false  # true = apply per-driver learned error offsets
+  bias_halflife_races: 3.0  # recency half-life (races) for the bias estimate
+  bias_max_abs: 3.0         # clamp each driver's correction to +/- this many places
+  prediction_log_dir: data/predictions
+  score_history_path: models/score_history.json
+
 models:
   laptime:
     n_estimators: 1000
