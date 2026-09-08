@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
@@ -10,16 +9,21 @@ from datetime import datetime
 from typing import Literal, Optional
 
 import pandas as pd
-import pickle
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from pipeline import feedback, orchestrate
 from pipeline.clean import run_cleaning
 from pipeline.config_loader import get_config
-from pipeline.evaluate import evaluate_laptime as _evaluate_laptime
-from pipeline.features import create_historical_features, run_feature_engineering
-from pipeline.fetch import fetch_upcoming_qualifying, run_fetch
+from pipeline.features import run_feature_engineering
+from pipeline.fetch import fetch_upcoming_qualifying, get_completed_race_rounds, run_fetch
+from pipeline.model_registry import _load_pickle, load_bundle, load_metrics  # noqa: F401 (re-export)
+from pipeline.predict import (
+    ModelNotLoadedError,
+    PredictionDataMissingError,
+    predict_race,
+)
 from pipeline.train import run_training
 
 _cfg = get_config()
@@ -48,45 +52,30 @@ app.add_middleware(
 )
 
 
-def _load_pickle(path):
-    try:
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    except Exception as e:
-        logger.warning("Could not load model %s: %s", path, e)
-        return None
-
-
-win_model = _load_pickle(_cfg.paths.models_dir / "xgb_racewin_pipeline.pkl")
-laptime_pipeline = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_pipeline.pkl")
-race_model = _load_pickle(_cfg.paths.models_dir / "race_prediction_pipeline.pkl")
-_laptime_features = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_features.pkl")
-
-_metrics: dict = {}
-_metrics_path = _cfg.paths.models_dir / "metrics.json"
+# _load_pickle is imported from pipeline.model_registry (kept importable as app._load_pickle).
+_b = load_bundle(_cfg)
+win_model = _b.win_model
+laptime_pipeline = _b.laptime_pipeline
+race_model = _b.race_model
+_laptime_features = _b.laptime_features
+_metrics: dict = _b.metrics
 
 
 def _reload_metrics() -> None:
     global _metrics
-    if _metrics_path.exists():
-        try:
-            _metrics = json.loads(_metrics_path.read_text())
-        except Exception as e:
-            logger.warning("Could not load metrics.json: %s", e)
+    _metrics = load_metrics(_cfg)
 
 
 def _reload_models() -> None:
     """Re-read model pickles + metrics from disk (e.g. after a /pipeline/train job)."""
     global win_model, laptime_pipeline, race_model, _laptime_features
-    win_model = _load_pickle(_cfg.paths.models_dir / "xgb_racewin_pipeline.pkl")
-    laptime_pipeline = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_pipeline.pkl")
-    race_model = _load_pickle(_cfg.paths.models_dir / "race_prediction_pipeline.pkl")
-    _laptime_features = _load_pickle(_cfg.paths.models_dir / "xgb_laptime_features.pkl")
+    b = load_bundle(_cfg)
+    win_model = b.win_model
+    laptime_pipeline = b.laptime_pipeline
+    race_model = b.race_model
+    _laptime_features = b.laptime_features
     _reload_metrics()
     logger.info("Models reloaded from disk.")
-
-
-_reload_metrics()
 
 
 # ---------------------------------------------------------------------------
@@ -315,134 +304,89 @@ class RacePrediction(BaseModel):
     model_r2: Optional[float] = None
 
 
+def _maybe_bias() -> Optional[dict]:
+    """Per-driver bias correction, only when enabled in config. Never raises."""
+    if not getattr(_cfg.feedback, "bias_correction_enabled", False):
+        return None
+    try:
+        return orchestrate.compute_bias(_cfg) or None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bias correction skipped: %s", e)
+        return None
+
+
+def _next_round_guess() -> Optional[int]:
+    """Best-effort 'which round is this prediction for' — for the prediction log."""
+    try:
+        up = _cfg.paths.data_dir / "upcoming_qualifying.csv"
+        if up.exists():
+            return int(pd.read_csv(up)["Race"].iloc[0])
+        done = get_completed_race_rounds(_cfg.pipeline.season)
+        return (max(done) + 1) if done else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @app.get("/predict_next_race", response_model=RacePrediction)
-async def predict_next_race(
+def predict_next_race(
     lookback_races: int = Query(
         default=DEFAULT_LOOKBACK_RACES,
         ge=MIN_LOOKBACK,
         le=MAX_LOOKBACK,
         description="Number of previous races to consider (optimal: 5-8)",
-    )
+    ),
+    save: bool = Query(
+        default=False,
+        description="Persist this prediction to the prediction log for later scoring.",
+    ),
 ):
-    """Predict next race positions for all drivers."""
-    if race_model is None:
-        raise HTTPException(status_code=503, detail="Race position model not loaded. Run: POST /pipeline/train {'model': 'position'}")
+    """Predict next race finishing positions for all drivers."""
     try:
-        results_path = _cfg.paths.data_dir / "f1_results_features.csv"
-        try:
-            f1_results = pd.read_csv(results_path)
-        except FileNotFoundError:
-            raise HTTPException(
-                status_code=404,
-                detail="Results data not found. Run: POST /pipeline/features",
-            )
-
-        season = _cfg.pipeline.season
-        season_data = f1_results[f1_results["Year"] == season].copy()
-        logger.info("Using %d records from %s season.", len(season_data), season)
-
-        completed_statuses = _cfg.constants.completed_statuses
-        processed = create_historical_features(
-            season_data, n_previous=lookback_races, completed_statuses=completed_statuses
+        result = predict_race(
+            _cfg, race_model, _metrics,
+            lookback=lookback_races,
+            bias=_maybe_bias(),
         )
-        if processed.empty:
-            raise HTTPException(status_code=500, detail="No data after processing.")
-
-        latest = processed.groupby("Driver").last().reset_index()
-        latest = latest[latest["avg_position_last"].notna()]
-
-        # Override with real qualifying data if available
-        upcoming_path = _cfg.paths.data_dir / "upcoming_qualifying.csv"
-        using_real_qualifying = False
-        race_label = "Next Grand Prix"
-        if upcoming_path.exists():
-            quali = pd.read_csv(upcoming_path)
-            race_label = quali["RaceName"].iloc[0] if "RaceName" in quali.columns else "Next Grand Prix"
-            for _, q_row in quali.iterrows():
-                driver_mask = latest["Driver"] == q_row["Driver"]
-                if not driver_mask.any():
-                    continue
-                for col in ["GridPosition", "BestQualifyingTime", "GapToPole", "QualifyingPerformance"]:
-                    if col in quali.columns:
-                        latest.loc[driver_mask, col] = q_row[col]
-            using_real_qualifying = True
-            logger.info("Applied real qualifying data from %s (%d drivers).", race_label, len(quali))
-        else:
-            logger.info("No upcoming_qualifying.csv found — using historical grid positions.")
-
-        race_features = [
-            "Driver", "Team", "GridPosition",
-            "driver_win_rate", "team_reliability", "QualifyingPerformance", "PositionChange",
-            "avg_position_last", "best_position_last", "avg_grid_last",
-            "dnf_last", "reliability_rate", "avg_positions_gained",
-            "podiums_last", "wins_last", "points_last", "form_trend",
-        ]
-        if "avg_quali_time" in latest.columns:
-            race_features.extend(["avg_quali_time", "avg_gap_to_pole"])
-
-        available = [f for f in race_features if f in latest.columns]
-        missing = [f for f in race_features if f not in latest.columns]
-        if missing:
-            logger.warning("Missing features for prediction: %s", missing)
-
-        predictions = race_model.predict(latest[available])
-
-        # Use stored R² as model-level confidence; use form consistency for per-driver confidence
-        model_r2 = _metrics.get("position", {}).get("r2")
-
-        results_list = []
-        for idx, row in latest.iterrows():
-            try:
-                # Per-driver confidence: higher when form is consistent (low std across recent positions)
-                form_consistency = 1.0 - min(1.0, abs(float(row.get("form_trend", 0))) / 5.0)
-                driver_confidence = round(
-                    (model_r2 if model_r2 is not None else 0.5) * form_consistency, 3
-                )
-
-                recent_form = {
-                    "avg_position": round(float(row["avg_position_last"]), 2),
-                    "best_position": int(row["best_position_last"]) if "best_position_last" in row else None,
-                    "podiums": int(row["podiums_last"]),
-                    "wins": int(row["wins_last"]) if "wins_last" in row else 0,
-                    "dnfs": int(row["dnf_last"]),
-                    "reliability": round(float(row["reliability_rate"]) * 100, 1) if "reliability_rate" in row else None,
-                    "form_trend": round(float(row["form_trend"]), 2) if pd.notna(row.get("form_trend")) else None,
-                    "driver_win_rate": round(float(row["driver_win_rate"]) * 100, 1) if "driver_win_rate" in row else None,
-                    "team_reliability": round(float(row["team_reliability"]), 1) if "team_reliability" in row else None,
-                    "quali_performance": round(float(row["QualifyingPerformance"]), 2) if "QualifyingPerformance" in row else None,
-                }
-                results_list.append(DriverPrediction(
-                    predicted_position=round(float(predictions[idx]), 2),
-                    driver=str(row["Driver"]),
-                    team=str(row["Team"]),
-                    confidence=driver_confidence,
-                    recent_form=recent_form,
-                ))
-            except Exception as e:
-                logger.error("Error processing %s: %s", row.get("Driver", "Unknown"), e)
-
-        if not results_list:
-            raise HTTPException(status_code=500, detail="No valid predictions generated.")
-
-        results_list.sort(key=lambda x: x.predicted_position)
-        logger.info(
-            "predict_next_race | race=%s lookback=%d | %d drivers predicted",
-            race_label, lookback_races, len(results_list),
+    except ModelNotLoadedError:
+        raise HTTPException(
+            status_code=503,
+            detail="Race position model not loaded. Run: POST /pipeline/train {'model': 'position'}",
         )
-
-        quali_note = "real qualifying" if using_real_qualifying else "historical grid positions"
-        return RacePrediction(
-            predictions=results_list[:20],
-            prediction_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            next_race=f"{race_label} — {quali_note}, last {lookback_races} races form",
-            model_r2=model_r2,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
+    except PredictionDataMissingError:
+        raise HTTPException(status_code=404, detail="Results data not found. Run: POST /pipeline/features")
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:  # noqa: BLE001
         logger.error("Error in predict_next_race: %s", e)
         raise HTTPException(status_code=500, detail=f"Prediction error: {e}")
+
+    if save:
+        try:
+            rnd = _next_round_guess()
+            if rnd is not None:
+                feedback.write_prediction_log(_cfg, result, round_no=rnd)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("prediction log write skipped: %s", e)
+
+    logger.info(
+        "predict_next_race | race=%s lookback=%d | %d drivers predicted",
+        result.race_label, lookback_races, len(result.forecasts),
+    )
+    return RacePrediction(
+        predictions=[
+            DriverPrediction(
+                predicted_position=f.predicted_position,
+                driver=f.driver,
+                team=f.team,
+                confidence=f.confidence,
+                recent_form=f.recent_form,
+            )
+            for f in result.forecasts
+        ],
+        prediction_date=result.prediction_date,
+        next_race=result.next_race,
+        model_r2=result.model_r2,
+    )
 
 
 @app.get("/health")
@@ -478,6 +422,7 @@ def health():
             "data_age_hours": data_age_hours,
             "data_fresh": not data_stale,
             "model_metrics": _metrics or None,
+            "feedback": _feedback_health(),
             "config": {
                 "season": _cfg.pipeline.season,
                 "default_lookback_races": DEFAULT_LOOKBACK_RACES,
@@ -486,6 +431,24 @@ def health():
         }
     except Exception as e:
         return {"status": "degraded", "error": str(e)}
+
+
+def _feedback_health():
+    """Informational drift block for /health. Never raises; drift does not flip status."""
+    try:
+        history = feedback.load_history(_cfg.feedback.score_history_path)
+        if not history or not _cfg.feedback.enabled:
+            return None
+        retrain, reasons = feedback.should_retrain(history, _cfg.feedback)
+        return {
+            "scored_races": len(history),
+            "rolling_scorecard": feedback.rolling_scorecard(history, _cfg.feedback.window_races),
+            "retrain_recommended": bool(retrain),
+            "reasons": reasons,
+            "bias_correction_enabled": _cfg.feedback.bias_correction_enabled,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -505,35 +468,32 @@ class RaceRoundRequest(BaseModel):
 
 
 def _job_train(model: TrainModel) -> dict:
-    run_training(_cfg, models=[model])
+    result = orchestrate.train_models(_cfg, model)
     _reload_models()
-    trained = ["laptime", "racewin", "position"] if model == "all" else [model]
-    return {"trained": trained, "metrics": {k: _metrics.get(k) for k in trained}}
+    return result
 
 
 def _job_evaluate_laptime(race: Optional[int]) -> dict:
-    results = _evaluate_laptime(_cfg, race_round=race)
-    abs_error = (results["Predicted_seconds"] - results["Actual_seconds"]).abs()
-    return {
-        "race_round": race,
-        "laps_evaluated": int(len(results)),
-        "mae": round(float(abs_error.mean()), 3),
-    }
+    return orchestrate.evaluate_laptime_job(_cfg, race)
+
+
+def _job_evaluate_position(race: Optional[int]) -> dict:
+    return orchestrate.evaluate_position_job(_cfg, race)
 
 
 def _job_run_all() -> dict:
-    run_fetch(_cfg)
-    run_cleaning(_cfg)
-    run_feature_engineering(_cfg)
-    run_training(_cfg)
+    result = orchestrate.run_all(_cfg)
     _reload_models()
-    qualifying_fetched = True
-    try:
-        fetch_upcoming_qualifying(_cfg)
-    except Exception as e:
-        logger.warning("run-all: fetch-qualifying skipped: %s", e)
-        qualifying_fetched = False
-    return {"trained": ["laptime", "racewin", "position"], "qualifying_fetched": qualifying_fetched}
+    return result
+
+
+def _job_score_race(race: int) -> dict:
+    out = orchestrate.score_race(_cfg, race)
+    if out["drift"]["retrain_recommended"] and _cfg.feedback.auto_retrain:
+        run_training(_cfg)
+        _reload_models()
+        out["retrained"] = True
+    return out
 
 
 @app.post("/pipeline/fetch", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
@@ -585,3 +545,50 @@ def pipeline_run_all():
     Runs as a single background job."""
     job_id = _submit_job("run-all", _job_run_all)
     return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/evaluate-position", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_evaluate_position(req: RaceRoundRequest):
+    """Audit the position model's predicted order vs actual for a completed race. Background job."""
+    job_id = _submit_job("evaluate-position", _job_evaluate_position, req.race)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/pipeline/score-race", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+def pipeline_score_race(req: RaceRoundRequest):
+    """Score a saved prediction (see /predict_next_race?save=true) against the actual
+    result, update the feedback loop, and report drift. Background job."""
+    if req.race is None:
+        raise HTTPException(status_code=422, detail="score-race requires an explicit 'race' round number.")
+    job_id = _submit_job("score-race", _job_score_race, req.race)
+    return {"job_id": job_id, "status": "queued"}
+
+
+# ---------------------------------------------------------------------------
+# Feedback loop — read-only views (synchronous)
+# ---------------------------------------------------------------------------
+@app.get("/predictions", tags=["feedback"])
+def list_predictions():
+    """All saved race predictions for the configured season, newest first."""
+    return list(reversed(feedback.list_prediction_logs(_cfg)))
+
+
+@app.get("/predictions/{round_no}", tags=["feedback"])
+def get_prediction(round_no: int):
+    """The saved prediction (and, once scored, the result) for one round."""
+    log = feedback.load_prediction_log(_cfg, round_no)
+    if log is None:
+        raise HTTPException(status_code=404, detail=f"No prediction log for round {round_no}.")
+    return log
+
+
+@app.get("/score-history", tags=["feedback"])
+def score_history():
+    """Per-race scores plus the rolling drift scorecard."""
+    history = feedback.load_history(_cfg.feedback.score_history_path)
+    retrain, reasons = feedback.should_retrain(history, _cfg.feedback) if history else (False, [])
+    return {
+        "history": history,
+        "rolling_scorecard": feedback.rolling_scorecard(history, _cfg.feedback.window_races),
+        "drift": {"retrain_recommended": bool(retrain), "reasons": reasons},
+    }

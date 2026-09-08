@@ -199,10 +199,81 @@ def test_job_status_404_for_unknown_id():
 
 
 def test_pipeline_train_reloads_models(monkeypatch):
-    monkeypatch.setattr(app_module, "run_training", lambda cfg, models=None: None)
+    # _job_train now delegates to pipeline.orchestrate.train_models
+    monkeypatch.setattr(
+        app_module.orchestrate,
+        "train_models",
+        lambda cfg, model: {"trained": [model], "metrics": {}},
+    )
     monkeypatch.setattr(app_module, "_reload_models", lambda: None)
     response = client.post("/pipeline/train", json={"model": "racewin"})
     assert response.status_code == 202
     job = _wait_for_job(response.json()["job_id"])
     assert job["status"] == "success"
     assert job["result"]["trained"] == ["racewin"]
+
+
+# ---------------------------------------------------------------------------
+# Feedback loop endpoints
+# ---------------------------------------------------------------------------
+def test_pipeline_evaluate_position_submits_job(monkeypatch):
+    monkeypatch.setattr(
+        app_module.orchestrate, "evaluate_position_job",
+        lambda cfg, race: {"race_round": race, "drivers_evaluated": 20, "position_mae": 3.2},
+    )
+    response = client.post("/pipeline/evaluate-position", json={"race": 13})
+    assert response.status_code == 202
+    job = _wait_for_job(response.json()["job_id"])
+    assert job["status"] == "success"
+    assert job["result"]["drivers_evaluated"] == 20
+
+
+def test_pipeline_score_race_requires_round():
+    assert client.post("/pipeline/score-race", json={}).status_code == 422
+
+
+def test_pipeline_score_race_runs(monkeypatch):
+    canned = {
+        "race_round": 13,
+        "metrics": {"winner_correct": False, "position_mae": 4.6},
+        "rolling_scorecard": {"races": 1},
+        "drift": {"retrain_recommended": False, "reasons": [], "auto_retrain": False},
+    }
+    monkeypatch.setattr(app_module.orchestrate, "score_race", lambda cfg, race, fetch_if_missing=True: canned)
+    response = client.post("/pipeline/score-race", json={"race": 13})
+    assert response.status_code == 202
+    job = _wait_for_job(response.json()["job_id"])
+    assert job["status"] == "success"
+    assert "drift" in job["result"]
+
+
+def test_score_history_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module.feedback, "load_history", lambda path: [])
+    data = client.get("/score-history").json()
+    assert data["history"] == []
+    assert "rolling_scorecard" in data
+
+
+def test_predictions_endpoint_shape(monkeypatch):
+    monkeypatch.setattr(
+        app_module.feedback, "list_prediction_logs",
+        lambda cfg: [{"round": 12, "forecasts": []}, {"round": 13, "forecasts": []}],
+    )
+    data = client.get("/predictions").json()
+    assert isinstance(data, list) and data[0]["round"] == 13  # newest first
+
+
+def test_health_includes_feedback_key():
+    data = client.get("/health").json()
+    assert "feedback" in data  # may be None when no history
+
+
+@needs_race_model
+def test_predict_next_race_parity():
+    import re
+    r = client.get("/predict_next_race?lookback_races=6")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"predictions", "prediction_date", "next_race", "model_r2"}
+    assert body["predictions"]
+    assert re.search(r" — (real qualifying|historical grid positions), last 6 races form$", body["next_race"])
