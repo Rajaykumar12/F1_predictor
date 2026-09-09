@@ -17,6 +17,18 @@ _DEFAULT_CONSTANTS = {
     "completed_statuses": ["Finished"],
 }
 
+_DEFAULT_FEATURES = {
+    "lookback_races": 6,
+    "shift": 1,
+    "families_enabled": [
+        "quali", "form", "racecraft", "team", "reliability", "circuit", "championship",
+    ],
+    "cv_splits": 5,
+    "holdout_rounds": 3,
+    "vif_threshold": 10.0,
+    "feature_selection": "lasso",
+}
+
 _DEFAULT_LOGGING = {"level": "INFO"}
 _DEFAULT_API = {"cors_origins": ["*"], "data_freshness_hours": 48}
 _DEFAULT_FEEDBACK = {
@@ -60,6 +72,17 @@ class ConstantsConfig:
     default_tire: str
     unknown_position: int
     completed_statuses: List[str]
+
+
+@dataclass
+class FeaturesConfig:
+    lookback_races: int
+    shift: int
+    families_enabled: List[str]
+    cv_splits: int
+    holdout_rounds: int
+    vif_threshold: float
+    feature_selection: str
 
 
 @dataclass
@@ -109,6 +132,7 @@ class Config:
     paths: PathsConfig
     pipeline: PipelineConfig
     constants: ConstantsConfig
+    features: FeaturesConfig
     logging: LoggingConfig
     api: ApiConfig
     models: ModelsConfig
@@ -139,6 +163,22 @@ class Config:
         if fb.bias_halflife_races <= 0:
             raise ValueError(
                 f"feedback.bias_halflife_races must be > 0, got {fb.bias_halflife_races}"
+            )
+        ft = self.features
+        if ft.lookback_races < 1:
+            raise ValueError(f"features.lookback_races must be >= 1, got {ft.lookback_races}")
+        if ft.shift < 0:
+            raise ValueError(f"features.shift must be >= 0, got {ft.shift}")
+        if ft.cv_splits < 2:
+            raise ValueError(f"features.cv_splits must be >= 2, got {ft.cv_splits}")
+        if ft.holdout_rounds < 1:
+            raise ValueError(f"features.holdout_rounds must be >= 1, got {ft.holdout_rounds}")
+        if ft.vif_threshold <= 1:
+            raise ValueError(f"features.vif_threshold must be > 1, got {ft.vif_threshold}")
+        if ft.feature_selection not in ("lasso", "vif", "none"):
+            raise ValueError(
+                "features.feature_selection must be one of lasso|vif|none, "
+                f"got {ft.feature_selection!r}"
             )
 
 
@@ -172,6 +212,9 @@ def get_config(config_path: Path = _CONFIG_PATH) -> Config:
         raw_constants = {**_DEFAULT_CONSTANTS, **raw.get("constants", {})}
         constants = ConstantsConfig(**raw_constants)
 
+        raw_features = {**_DEFAULT_FEATURES, **raw.get("features", {})}
+        features_cfg = FeaturesConfig(**raw_features)
+
         raw_logging = {**_DEFAULT_LOGGING, **raw.get("logging", {})}
         logging_cfg = LoggingConfig(**raw_logging)
 
@@ -195,6 +238,7 @@ def get_config(config_path: Path = _CONFIG_PATH) -> Config:
         paths=paths,
         pipeline=pipeline,
         constants=constants,
+        features=features_cfg,
         logging=logging_cfg,
         api=api,
         models=models,
