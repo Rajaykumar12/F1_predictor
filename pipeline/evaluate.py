@@ -11,7 +11,7 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score
 
 from pipeline.config_loader import Config
-from pipeline.features import create_historical_features
+from pipeline.features import build_position_features, create_historical_features
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +124,10 @@ def evaluate_position(config: Config, race_round: int | None = None) -> pd.DataF
     """Compare the position model's predicted finishing order vs the actual result
     for a completed race. Mirrors ``evaluate_laptime``.
 
-    NOTE: this is a post-hoc audit of a race that already happened — it does NOT
-    apply an ``as_of_round`` cutoff, so the unshifted rolling-window inflation is
-    present (and noted). Use ``scripts/backtest.py`` for an honest held-out score.
+    NOTE: this is a post-hoc audit. The *features* are leakage-safe (build_position
+    _features applies shift-before-roll), but the loaded model was trained on data
+    that INCLUDES this race, so the score is still optimistic. Use
+    ``scripts/backtest.py`` for an honest held-out-model score.
     """
     import pickle
 
@@ -151,18 +152,14 @@ def evaluate_position(config: Config, race_round: int | None = None) -> pd.DataF
             f"Round {race_round} not in data. Available rounds: {available_races}"
         )
 
-    processed = create_historical_features(
-        season_df,
-        n_previous=config.pipeline.lookback_races,
-        completed_statuses=config.constants.completed_statuses,
-    )
+    processed = build_position_features(season_df, config)
     rows = (
         processed[processed["Race"] == race_round]
         .groupby("Driver")
         .last()
         .reset_index()
     )
-    rows = rows[rows["avg_position_last"].notna()].reset_index(drop=True)
+    rows = rows[rows["form_avg_finish_s5"].notna()].reset_index(drop=True)
     if rows.empty:
         raise RuntimeError(f"No usable driver rows for Round {race_round}.")
 
@@ -207,8 +204,8 @@ def evaluate_position(config: Config, race_round: int | None = None) -> pd.DataF
             ["PredRank", "Driver", "Team", "PredictedPosition", "ActualPosition", "Error"]
         ].to_string(index=False)
     )
-    print("\n  (post-hoc audit — rolling-window features include the race itself;")
-    print("   see scripts/backtest.py for an honest held-out score.)")
+    print("\n  (post-hoc audit — features are leakage-safe, but the model was")
+    print("   trained on this race; see scripts/backtest.py for a held-out score.)")
 
     _save_position_eval_plots(out, race_round, season, metrics, plots_dir)
     return out
