@@ -15,8 +15,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from pipeline import feature_registry as fr
 from pipeline.config_loader import Config
-from pipeline.features import create_historical_features
+from pipeline.features import build_position_features
 from pipeline.model_registry import model_feature_columns
 
 logger = logging.getLogger(__name__)
@@ -89,11 +90,11 @@ def predict_race(
     season_data = f1_results[f1_results["Year"] == season].copy()
     logger.info("Using %d records from %s season.", len(season_data), season)
 
-    processed = create_historical_features(
-        season_data,
-        n_previous=lookback,
-        completed_statuses=config.constants.completed_statuses,
-        as_of_round=as_of_round,
+    # One code path with training: build_position_features assembles the exact
+    # leakage-safe registry feature set (create_historical_features + family
+    # builders), honouring the as-of-round cutoff for an honest snapshot.
+    processed = build_position_features(
+        season_data, config, as_of_round=as_of_round, lookback=lookback
     )
     if processed.empty:
         raise ValueError("No data after processing.")
@@ -122,6 +123,14 @@ def predict_race(
     # The feature list is read straight off the fitted model, so it can never
     # drift from what train.py used.
     race_features = model_feature_columns(race_model)
+    # Forecast-time guard: never feed a feature that needs post-race information
+    # (none in the registry today, but this keeps a future as_of_safe=False
+    # feature out of a real prediction automatically).
+    unsafe = set(fr.as_of_unsafe(fr.all_features()))
+    dropped_unsafe = [f for f in race_features if f in unsafe]
+    if dropped_unsafe:
+        logger.warning("Dropping as-of-unsafe features from the forecast: %s", dropped_unsafe)
+        race_features = [f for f in race_features if f not in unsafe]
     missing = [f for f in race_features if f not in latest.columns]
     if missing:
         logger.warning("Missing features for prediction: %s", missing)

@@ -11,6 +11,15 @@ pipeline:
   max_lookback: 12
   api_sleep_seconds: 2
 
+features:
+  lookback_races: 6           # rolling-window span for form/racecraft families
+  shift: 1                    # .shift(N) applied before every rolling window
+  families_enabled: [quali, form, racecraft, team, reliability, circuit, championship]
+  cv_splits: 5               # GroupKFold(by Race) splits for honest CV
+  holdout_rounds: 3          # forward-chaining holdout: last N rounds are the test set
+  vif_threshold: 10.0        # hard cap; the quality gate fails above this
+  feature_selection: lasso   # lasso | vif | none
+
 constants:
   grid_size: 20
   race_phase_bins: [0, 15, 40, 100]

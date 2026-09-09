@@ -1,0 +1,24 @@
+round,circuit_key,location,circuit_is_street,circuit_overtaking_index,circuit_sc_probability,lap_count
+1,melbourne,Albert Park,1,3,0.55,58
+2,shanghai,Shanghai International,0,4,0.35,56
+3,suzuka,Suzuka,0,2,0.40,53
+4,miami,Miami International Autodrome,1,3,0.45,57
+5,montreal,Circuit Gilles Villeneuve,1,4,0.65,70
+6,monaco,Circuit de Monaco,1,1,0.60,78
+7,barcelona,Circuit de Barcelona-Catalunya,0,2,0.25,66
+8,spielberg,Red Bull Ring,0,4,0.40,71
+9,silverstone,Silverstone,0,4,0.45,52
+10,spa,Spa-Francorchamps,0,4,0.50,44
+11,budapest,Hungaroring,0,2,0.35,70
+12,zandvoort,Zandvoort,0,2,0.45,72
+13,monza,Monza,0,5,0.40,53
+14,madrid,Madring,1,3,0.45,57
+15,baku,Baku City Circuit,1,4,0.70,51
+16,sakhir,Bahrain International,0,4,0.45,57
+17,marina_bay,Marina Bay Street Circuit,1,2,0.80,62
+18,austin,Circuit of the Americas,0,4,0.45,56
+19,mexico_city,Autodromo Hermanos Rodriguez,0,3,0.50,71
+20,interlagos,Autodromo Jose Carlos Pace,0,4,0.55,71
+21,las_vegas,Las Vegas Strip Circuit,1,4,0.60,50
+22,lusail,Lusail International,0,3,0.35,57
+23,yas_marina,Yas Marina,0,3,0.40,58
