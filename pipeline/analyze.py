@@ -79,40 +79,36 @@ class FeatureSpec:
 # --------------------------------------------------------------------------- #
 # Phase 1 — data prep
 # --------------------------------------------------------------------------- #
-def _position_race_features(processed: pd.DataFrame) -> list[str]:
-    """The position model's candidate feature list (train.py:198-206)."""
-    race_features = [
-        "Driver", "Team", "GridPosition",
-        "driver_win_rate", "team_reliability", "QualifyingPerformance", "PositionChange",
-        "avg_position_last", "best_position_last", "avg_grid_last",
-        "dnf_last", "reliability_rate", "avg_positions_gained",
-        "podiums_last", "wins_last", "points_last", "form_trend",
+def _registry_feature_names() -> list[str]:
+    from pipeline import feature_registry as fr
+
+    return fr.feature_names(fr.all_features())
+
+
+def _assemble_frame(results: pd.DataFrame, config: Config, shift: int) -> pd.DataFrame:
+    """Build the registry feature set on ``results`` at the given ``shift`` and
+    trim to (features + 4 targets + Race/Driver/Team), dropping rows with a
+    missing numeric feature or target."""
+    from pipeline.features import build_position_features
+
+    processed = build_position_features(results, config, shift=shift)
+    names = [c for c in _registry_feature_names() if c in processed.columns]
+    numeric = [
+        c for c in names
+        if c not in CATEGORICAL and pd.api.types.is_numeric_dtype(processed[c])
     ]
-    if "avg_quali_time" in processed.columns:
-        race_features += ["avg_quali_time", "avg_gap_to_pole"]
-    return [f for f in race_features if f in processed.columns]
+    keep = list(dict.fromkeys(names + list(ALL_TARGETS) + [RACE_COL, "Driver", "Team"]))
+    keep = [c for c in keep if c in processed.columns]
+    frame = processed[keep].dropna(subset=numeric + ["Position"])
+    return frame.reset_index(drop=True)
 
 
 def build_raw_frame(results: pd.DataFrame, config: Config) -> pd.DataFrame:
-    """Reproduce ``train_position_model``'s ``processed`` + dropna exactly, then
-    carry ``Race`` / ``Driver`` / ``Team`` alongside for grouping and clustering.
-
-    The 4 targets and the leaky ``PositionChange`` are all retained; ``feature_specs``
-    flags what is leaky.
-    """
-    processed = create_historical_features(
-        results,
-        n_previous=config.pipeline.lookback_races,
-        completed_statuses=config.constants.completed_statuses,
-    )
-    available = _position_race_features(processed)
-
-    _cross_check_against_pickle(available, config)
-
-    keep = list(dict.fromkeys(available + list(ALL_TARGETS) + [RACE_COL, "Driver", "Team"]))
-    keep = [c for c in keep if c in processed.columns]
-    frame = processed[keep].dropna(subset=[c for c in available if c in processed.columns] + ["Position"])
-    return frame.reset_index(drop=True)
+    """Regression guard: the registry feature set rebuilt with ``shift=0`` so
+    every rolling / expanding history feature includes the target race. Used only
+    to show what leakage *would* do — ``feature_specs('raw')`` flags those
+    features leaky."""
+    return _assemble_frame(results, config, shift=0)
 
 
 def _cross_check_against_pickle(available: list[str], config: Config) -> None:
@@ -205,80 +201,53 @@ def _expanding_pre_race_rate(df: pd.DataFrame, group: str, event: pd.Series) -> 
 def build_clean_frame(
     results: pd.DataFrame, config: Config, drop_rates: bool = False
 ) -> pd.DataFrame:
-    """Leakage-controlled twin of ``build_raw_frame``:
+    """The production feature set (registry, ``shift`` from config) — the honest
+    twin of :func:`build_raw_frame`. Every feature is leakage-safe by
+    construction: shift-before-roll windows, expanding pre-race rates, no
+    target-derived column, no ``PositionChange``.
 
-    * **drop** ``PositionChange`` (it is ``GridPosition - Position``);
-    * **replace** ``driver_win_rate`` / ``team_reliability`` with expanding
-      *pre-race* rates (per group sorted by ``Race``: cumulative rate over races
-      strictly before this one; first race -> NaN). ``drop_rates=True`` drops
-      both instead;
-    * use the ``.shift(1)`` rollups from :func:`add_shifted_history`;
-    * keep ``GridPosition``, ``QualifyingPerformance``, ``Driver``, ``Team``,
-      ``form_trend``.
+    ``drop_rates=True`` additionally drops the ``reliability`` family
+    (``driver_dnf_rate_todate`` / ``team_reliability_todate``) — kept for
+    backward-compatible call sites.
     """
-    n_prev = config.pipeline.lookback_races
-    completed = config.constants.completed_statuses
-    shifted = add_shifted_history(results, n_prev, completed)
-
-    shifted = shifted.drop(columns=[c for c in ("PositionChange",) if c in shifted.columns])
-
+    frame = _assemble_frame(results, config, shift=config.features.shift)
     if drop_rates:
-        shifted = shifted.drop(
-            columns=[c for c in ("driver_win_rate", "team_reliability") if c in shifted.columns]
+        frame = frame.drop(
+            columns=[c for c in ("driver_dnf_rate_todate", "team_reliability_todate")
+                     if c in frame.columns]
         )
-    else:
-        shifted = shifted.sort_values([RACE_COL, "Driver"]).reset_index(drop=True)
-        win = (shifted["Position"] == 1).astype(float)
-        rel = shifted["Status"].isin(completed).astype(float)
-        shifted["driver_win_rate"] = _expanding_pre_race_rate(shifted, "Driver", win)
-        shifted["team_reliability"] = _expanding_pre_race_rate(shifted, "Team", rel)
+    return frame
 
-    feats = [s.name for s in feature_specs("clean") if s.name in shifted.columns]
-    keep = list(dict.fromkeys(feats + list(ALL_TARGETS) + [RACE_COL, "Driver", "Team"]))
-    keep = [c for c in keep if c in shifted.columns]
-    frame = shifted[keep].dropna(subset=feats + ["Position"])
-    return frame.reset_index(drop=True)
+
+# Families whose columns are only leakage-safe *because* of the shift-before-roll
+# / expanding-pre-race construction. In the "raw" (shift=0) regression guard they
+# revert to including the target race, so they are flagged leaky there.
+_HISTORY_FAMILIES = ("form", "racecraft", "reliability", "team")
 
 
 def feature_specs(frame_kind: str) -> list[FeatureSpec]:
-    """Feature list + leakage flags for ``frame_kind`` in {"raw", "clean"}."""
+    """Feature list + leakage flags for ``frame_kind`` in {"raw", "clean"}.
+
+    Single source of truth = :data:`pipeline.feature_registry.REGISTRY`. The
+    "clean" frame is the registry exactly as the production model sees it (every
+    feature ``leaky=False``). The "raw" frame is the same feature set rebuilt with
+    ``shift=0`` — an intentional regression guard — so every rolling / expanding
+    history feature is flagged ``leaky=True`` there.
+    """
     if frame_kind not in ("raw", "clean"):
         raise ValueError(f"frame_kind must be 'raw' or 'clean', got {frame_kind!r}")
 
-    unshifted = ("includes the current race in its own rolling window "
-                 "(create_historical_features windows are unshifted)")
-    specs: list[FeatureSpec] = [
-        FeatureSpec("GridPosition", "numeric", False, ""),
-        FeatureSpec("QualifyingPerformance", "numeric", False, ""),
-        FeatureSpec("form_trend", "numeric", False, ""),
-        FeatureSpec("Driver", "categorical", False, ""),
-        FeatureSpec("Team", "categorical", False, ""),
-    ]
-    rollups = [
-        "avg_position_last", "best_position_last", "avg_grid_last",
-        "dnf_last", "reliability_rate", "avg_positions_gained",
-        "podiums_last", "wins_last", "points_last",
-        "avg_quali_time", "avg_gap_to_pole",
-    ]
-    if frame_kind == "raw":
-        specs.append(FeatureSpec(
-            "PositionChange", "numeric", True,
-            "equals GridPosition - Position exactly (R^2 ~ 1)"))
-        specs.append(FeatureSpec(
-            "driver_win_rate", "numeric", True,
-            "whole-season aggregate including the target row; constant within Driver"))
-        specs.append(FeatureSpec(
-            "team_reliability", "numeric", True,
-            "whole-season aggregate including the target row; constant within Team"))
-        specs += [FeatureSpec(r, "numeric", True, unshifted) for r in rollups]
-    else:
-        specs.append(FeatureSpec(
-            "driver_win_rate", "numeric", False,
-            "expanding pre-race win rate (races strictly before the current one)"))
-        specs.append(FeatureSpec(
-            "team_reliability", "numeric", False,
-            "expanding pre-race finish rate (races strictly before the current one)"))
-        specs += [FeatureSpec(r, "numeric", False, "") for r in rollups]
+    from pipeline import feature_registry as fr
+
+    specs: list[FeatureSpec] = []
+    for feat in fr.all_features():
+        if frame_kind == "raw" and feat.family in _HISTORY_FAMILIES:
+            specs.append(FeatureSpec(
+                feat.name, feat.kind, True,
+                "shift=0 regression guard — window/expansion includes the target race",
+            ))
+        else:
+            specs.append(FeatureSpec(feat.name, feat.kind, False, ""))
     return specs
 
 
@@ -979,67 +948,92 @@ def _r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
 
+def _insample_ols_r2(df: pd.DataFrame, features: list[str], target: str = "Position") -> float:
+    """In-sample OLS R² of ``target ~ features`` (numeric only, +intercept). A
+    value near 1.0 means some feature (combination) reconstructs the target — the
+    signature of an identity leak like the old ``GridPosition - PositionChange``."""
+    cols = [c for c in features if c in df.columns]
+    d = df[cols + [target]].dropna()
+    if len(d) <= len(cols) + 1 or not cols:
+        return float("nan")
+    x = np.column_stack([np.ones(len(d))] + [d[c].to_numpy(float) for c in cols])
+    y = d[target].to_numpy(float)
+    coef, *_ = np.linalg.lstsq(x, y, rcond=None)
+    return _r2(y, x @ coef)
+
+
 def leakage_report(raw_df: pd.DataFrame, clean_df: pd.DataFrame, config: Config) -> dict:
-    """The four Phase-5 checks; JSON-serializable."""
+    """Post-redesign leakage checks; JSON-serializable.
+
+    ``raw_df`` = registry features at ``shift=0`` (regression guard);
+    ``clean_df`` = the production set (``shift`` from config).
+    """
     out: dict = {}
 
-    # 1. Position == GridPosition - PositionChange identity
-    if {"GridPosition", "PositionChange"}.issubset(raw_df.columns):
-        recon = (raw_df["GridPosition"] - raw_df["PositionChange"]).to_numpy(float)
-        pos = raw_df["Position"].to_numpy(float)
-        out["identity"] = {
-            "expr": "Position == GridPosition - PositionChange",
-            "r2": _r2(pos, recon),
-            "max_abs_residual": float(np.max(np.abs(pos - recon))),
-        }
+    clean_num = [s.name for s in specs_for_frame(clean_df, "clean") if s.kind == "numeric"]
+    raw_num = [s.name for s in specs_for_frame(raw_df, "raw") if s.kind == "numeric"]
 
-    # 2. Position-model GroupKFold(by Race) MAE with vs without the leaky trio
-    feats = [s.name for s in specs_for_frame(raw_df, "raw")]
-    trio = [f for f in LEAKY_TRIO if f in feats]
-    without_trio = [f for f in feats if f not in trio]
-    mae_with = _grouped_cv_mae(raw_df, feats, 5, config)
-    mae_without = _grouped_cv_mae(raw_df, without_trio, 5, config)
-    out["leaky_trio_cv_mae"] = {
-        "trio": trio,
-        "cv_mae_with_trio": mae_with,
-        "cv_mae_without_trio": mae_without,
-        "ratio_without_over_with": mae_without / mae_with if mae_with else np.nan,
+    # 1. Identity probe — no single feature / linear combination should
+    #    reconstruct Position. (The deleted PositionChange gave R^2 ~ 1.0.)
+    best_single = max(
+        ((c, _safe_corr(clean_df[c], clean_df["Position"]) ** 2) for c in clean_num
+         if c in clean_df.columns),
+        key=lambda kv: (kv[1] if kv[1] == kv[1] else -1), default=(None, float("nan")),
+    )
+    out["identity"] = {
+        "expr": "Position ~ numeric features (in-sample OLS)",
+        "r2": _insample_ols_r2(clean_df, clean_num),
+        "r2_raw_shift0": _insample_ols_r2(raw_df, raw_num),
+        "max_single_feature_r2": None if best_single[1] != best_single[1] else float(best_single[1]),
+        "max_single_feature": best_single[0],
     }
 
-    # 3. each unshifted rollup vs its shifted twin
-    completed = config.constants.completed_statuses
-    n_prev = config.pipeline.lookback_races
-    shifted = add_shifted_history(raw_df, n_prev, completed) if "Status" in raw_df.columns else None
-    rollup_rows = []
-    for name in _ROLLUPS:
-        if name not in raw_df.columns:
-            continue
-        row = {"rollup": name, "corr_unshifted_vs_position": _safe_corr(raw_df[name], raw_df["Position"])}
-        if shifted is not None and name in shifted.columns:
-            m = raw_df[["Driver", RACE_COL, name, "Position"]].merge(
-                shifted[["Driver", RACE_COL, name]], on=["Driver", RACE_COL],
-                suffixes=("_unshifted", "_shifted"),
-            )
-            row["corr_shifted_vs_position"] = _safe_corr(m[f"{name}_shifted"], m["Position"])
-            row["corr_shifted_vs_unshifted"] = _safe_corr(m[f"{name}_shifted"], m[f"{name}_unshifted"])
-        rollup_rows.append(row)
-    out["rollup_shift_comparison"] = rollup_rows
+    # 2. shift guard — GroupKFold(by Race) MAE, shift=0 vs the production shift.
+    #    shift=0 should look *better* (it is cheating); the gap quantifies the
+    #    leak the shift removes.
+    mae_raw = _grouped_cv_mae(raw_df, raw_num + [c for c in CATEGORICAL if c in raw_df.columns],
+                              config.features.cv_splits, config)
+    mae_clean = _grouped_cv_mae(clean_df, clean_num + [c for c in CATEGORICAL if c in clean_df.columns],
+                                config.features.cv_splits, config)
+    out["shift_guard_cv_mae"] = {
+        "cv_mae_shift0": mae_raw,
+        "cv_mae_production": mae_clean,
+        "leak_inflation": (mae_clean - mae_raw) if (mae_raw == mae_raw) else float("nan"),
+    }
 
-    # 4. driver_win_rate / team_reliability degeneracy
+    # 3. history-family features: shift=0 vs production shift, correlation with the
+    #    target and with each other.
+    from pipeline import feature_registry as fr
+
+    hist = [f.name for f in fr.all_features() if f.family in _HISTORY_FAMILIES]
+    rows = []
+    for name in hist:
+        if name not in raw_df.columns or name not in clean_df.columns:
+            continue
+        m = raw_df[["Driver", RACE_COL, name, "Position"]].merge(
+            clean_df[["Driver", RACE_COL, name]], on=["Driver", RACE_COL],
+            suffixes=("_shift0", "_prod"),
+        )
+        rows.append({
+            "feature": name,
+            "corr_shift0_vs_position": _safe_corr(m[f"{name}_shift0"], m["Position"]),
+            "corr_prod_vs_position": _safe_corr(m[f"{name}_prod"], m["Position"]),
+            "corr_shift0_vs_prod": _safe_corr(m[f"{name}_shift0"], m[f"{name}_prod"]),
+        })
+    out["history_shift_comparison"] = rows
+
+    # 4. season-to-date rates must vary within their group (the old whole-season
+    #    driver_win_rate / team_reliability were constant within Driver/Team).
     deg = {}
-    for feat, grp in (("driver_win_rate", "Driver"), ("team_reliability", "Team")):
-        if feat in raw_df.columns:
-            nun = raw_df.groupby(grp)[feat].nunique(dropna=False)
+    for feat, grp in (("driver_dnf_rate_todate", "Driver"), ("team_reliability_todate", "Team")):
+        if feat in clean_df.columns:
+            nun = clean_df.groupby(grp)[feat].nunique(dropna=False)
             deg[feat] = {
                 "group": grp,
                 "constant_within_group": bool(nun.max() <= 1),
                 "max_distinct_per_group": int(nun.max()),
             }
-    if "driver_win_rate" in raw_df.columns:
-        mean_pos = raw_df.groupby("Driver")["Position"].mean()
-        wr = raw_df.groupby("Driver")["driver_win_rate"].first()
-        deg["driver_win_rate"]["corr_with_driver_mean_finish"] = _safe_corr(wr, mean_pos)
-    out["rate_feature_degeneracy"] = deg
+    out["rate_feature_variation"] = deg
 
     return json.loads(json.dumps(out, default=_json_default))
 
@@ -1282,24 +1276,25 @@ def _render_report(built, uni, multi, model, leakage, config, *, targets, n_perm
     if leakage:
         idy = leakage.get("identity", {})
         if idy:
-            w(f"- Identity `{idy['expr']}`: R^2 = {_fmt(idy['r2'])}, "
-              f"max abs residual = {_fmt(idy['max_abs_residual'])}")
-        lt = leakage.get("leaky_trio_cv_mae", {})
+            w(f"- Identity probe `{idy['expr']}`: R^2 = {_fmt(idy['r2'])} "
+              f"(shift=0 guard R^2 = {_fmt(idy.get('r2_raw_shift0'))}); "
+              f"strongest single feature `{idy.get('max_single_feature')}` "
+              f"R^2 = {_fmt(idy.get('max_single_feature_r2'))}")
+        lt = leakage.get("shift_guard_cv_mae", {})
         if lt:
-            w(f"- Position-model CV MAE **with** leaky trio {lt['trio']} = "
-              f"{_fmt(lt['cv_mae_with_trio'])}; **without** = {_fmt(lt['cv_mae_without_trio'])} "
-              f"(ratio {_fmt(lt['ratio_without_over_with'])})")
+            w(f"- Position-model GroupKFold MAE at **shift=0** = {_fmt(lt['cv_mae_shift0'])} "
+              f"vs **production shift** = {_fmt(lt['cv_mae_production'])} "
+              f"(leak inflation {_fmt(lt.get('leak_inflation'))} places)")
         w("")
-        w("| rollup | corr(unshifted, Position) | corr(shifted, Position) | corr(shifted, unshifted) |")
+        w("| history feature | corr(shift0, Position) | corr(prod, Position) | corr(shift0, prod) |")
         w("| --- | --- | --- | --- |")
-        for r in leakage.get("rollup_shift_comparison", []):
-            w(f"| {r['rollup']} | {_fmt(r.get('corr_unshifted_vs_position'))} | "
-              f"{_fmt(r.get('corr_shifted_vs_position'))} | {_fmt(r.get('corr_shifted_vs_unshifted'))} |")
+        for r in leakage.get("history_shift_comparison", []):
+            w(f"| {r['feature']} | {_fmt(r.get('corr_shift0_vs_position'))} | "
+              f"{_fmt(r.get('corr_prod_vs_position'))} | {_fmt(r.get('corr_shift0_vs_prod'))} |")
         w("")
-        for feat, d in leakage.get("rate_feature_degeneracy", {}).items():
-            w(f"- `{feat}`: constant within {d['group']} = {d['constant_within_group']}"
-              + (f", corr with {d['group']} mean finish = {_fmt(d.get('corr_with_driver_mean_finish'))}"
-                 if "corr_with_driver_mean_finish" in d else ""))
+        for feat, d in leakage.get("rate_feature_variation", {}).items():
+            w(f"- `{feat}`: constant within {d['group']} = {d['constant_within_group']} "
+              f"(max distinct per {d['group']} = {d['max_distinct_per_group']})")
     w("")
 
     # 8. method notes

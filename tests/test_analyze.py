@@ -185,8 +185,11 @@ def test_build_clean_frame_drops_leakage(tmp_path):
     cfg = _tmp_config(tmp_path)
     clean = analyze.build_clean_frame(df, cfg)
     assert "PositionChange" not in clean.columns
-    # shifted rollup present and finite
-    assert clean["avg_position_last"].notna().all()
+    # registry feature present and finite after the frame's dropna
+    assert "form_avg_finish_s5" in clean.columns
+    assert clean["form_avg_finish_s5"].notna().all()
+    # every clean-frame spec is non-leaky
+    assert not any(s.leaky for s in analyze.specs_for_frame(clean, "clean"))
 
 
 # --------------------------------------------------------------------------- #
@@ -206,6 +209,7 @@ def test_driver_constant_feature_uses_within_driver_scheme():
 _DATA_CSV = Path(__file__).resolve().parents[1] / "data" / "f1_results_features.csv"
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _DATA_CSV.exists(), reason="feature CSV not present")
 def test_run_feature_analysis_smoke_no_model():
     from pipeline.config_loader import get_config
@@ -220,6 +224,7 @@ def test_run_feature_analysis_smoke_no_model():
     assert (u["q_perm_bh"].dropna() >= u.loc[u["q_perm_bh"].notna(), "p_perm"] - 1e-9).all()
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _DATA_CSV.exists(), reason="feature CSV not present")
 def test_run_feature_analysis_smoke_tiny_model():
     from pipeline.config_loader import get_config

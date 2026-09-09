@@ -98,37 +98,26 @@ def _sanity_checks(analysis: dict) -> None:
     lines = ["", "sanity checks:"]
 
     if uni is not None and not uni.empty:
-        raw_pos = uni[(uni["frame"] == "raw") & (uni["target"] == "Position")
-                      & (uni["test"] == "spearman")]
-        if not raw_pos.empty:
-            ranked = raw_pos.reindex(raw_pos["statistic"].abs().sort_values(ascending=False).index)
-            ranked = ranked.reset_index(drop=True)
-            lines.append(f"  raw/Position top-3 by |Spearman|: "
+        clean_pos = uni[(uni["frame"] == "clean") & (uni["target"] == "Position")
+                        & (uni["test"] == "spearman")]
+        if not clean_pos.empty:
+            ranked = clean_pos.reindex(
+                clean_pos["statistic"].abs().sort_values(ascending=False).index
+            ).reset_index(drop=True)
+            lines.append("  clean/Position top-3 by |Spearman|: "
                          + ", ".join(f"{r['feature']}({r['statistic']:+.2f})"
                                      for _, r in ranked.head(3).iterrows()))
-            pc = ranked[ranked["feature"] == "PositionChange"]
-            if not pc.empty:
-                rank = int(pc.index[0]) + 1
-                lines.append(f"  PositionChange raw: |Spearman| rank {rank}/{len(ranked)}, "
-                             f"rho={pc.iloc[0]['statistic']:+.3f}, p_perm={pc.iloc[0]['p_perm']:.4g}, "
-                             f"leaky={bool(pc.iloc[0]['leaky'])} "
-                             "(leakage surfaces in the multivariable degenerate fit and "
-                             "drop-one CV delta, not univariate Spearman)")
-        clean_feats = set(uni[uni["frame"] == "clean"]["feature"])
-        lines.append(f"  clean frame contains PositionChange: {'PositionChange' in clean_feats}")
-        for f in ("driver_win_rate", "team_reliability"):
-            row = uni[(uni["frame"] == "raw") & (uni["feature"] == f)]
-            if not row.empty:
-                lines.append(f"  {f} raw perm_scheme: {row.iloc[0]['perm_scheme']} "
-                             f"(p_perm={row.iloc[0]['p_perm']:.3g})")
+        n_leaky_clean = int(uni[(uni["frame"] == "clean") & uni["leaky"]].shape[0])
+        lines.append(f"  clean-frame rows flagged leaky: {n_leaky_clean} (expect 0)")
 
-    lt = leak.get("leaky_trio_cv_mae", {})
+    lt = leak.get("shift_guard_cv_mae", {})
     if lt:
-        lines.append(f"  position-model CV MAE with leaky trio={lt['cv_mae_with_trio']:.3f} "
-                     f"vs without={lt['cv_mae_without_trio']:.3f}")
+        lines.append(f"  position-model GroupKFold MAE  shift0={lt['cv_mae_shift0']:.3f} "
+                     f"vs production={lt['cv_mae_production']:.3f}")
     idy = leak.get("identity", {})
     if idy:
-        lines.append(f"  identity R^2={idy['r2']:.6f} (max abs residual {idy['max_abs_residual']:.2g})")
+        lines.append(f"  identity probe R^2={idy['r2']:.4f} "
+                     f"(max single-feature R^2={idy.get('max_single_feature_r2') or float('nan'):.4f})")
     if model is not None and not model.empty:
         assert (model["p_perm_importance"].dropna().between(0, 1)).all(), "p_perm_importance out of [0,1]"
         lines.append("  model p_perm_importance all in [0, 1]: True")
