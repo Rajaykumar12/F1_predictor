@@ -74,4 +74,6 @@ CLAUDE.md
 .claude
 graphify-out
 models
-data
+data/*
+# ...except hand-curated static references that belong in version control
+!data/circuits.csv

@@ -78,20 +78,33 @@ def test_team_reliability_uses_completed_statuses():
     assert rel_lenient["Red Bull"] == 100.0
 
 
-def test_create_historical_features_dnf_counts():
+def test_create_historical_features_shift_excludes_current_race():
+    """Shift-before-roll: a race's own DNF must not appear in its own window."""
     results = _make_results()
     out = create_historical_features(results, n_previous=6, completed_statuses=["Finished"])
-    ver = out[out["Driver"] == "VER"]
-    # VER race 2: status "+1 Lap" — with strict completed_statuses, should count as DNF
-    assert ver.iloc[1]["dnf_last"] >= 1
-
-
-def test_create_historical_features_lenient_statuses():
-    results = _make_results()
-    out = create_historical_features(results, n_previous=6, completed_statuses=["Finished", "+1 Lap"])
-    ver = out[out["Driver"] == "VER"]
-    # With lenient statuses "+1 Lap" is NOT a DNF
+    ver = out[out["Driver"] == "VER"].sort_values("Race").reset_index(drop=True)
+    # race 1: no prior history -> NaN window
+    assert pd.isna(ver.iloc[0]["dnf_last"])
+    # race 2 is "+1 Lap" (a DNF under strict statuses) but the window only sees
+    # race 1 (Finished) -> 0, i.e. the current race is excluded.
     assert ver.iloc[1]["dnf_last"] == 0
+
+
+def test_create_historical_features_no_position_change_column():
+    results = _make_results()
+    out = create_historical_features(results, n_previous=6)
+    assert "PositionChange" not in out.columns
+
+
+def test_create_historical_features_shift0_is_legacy_unshifted():
+    """shift=0 reproduces the old leaky window (current race included)."""
+    results = _make_results()
+    out = create_historical_features(
+        results, n_previous=6, completed_statuses=["Finished"], shift=0
+    )
+    ver = out[out["Driver"] == "VER"].sort_values("Race").reset_index(drop=True)
+    # race 2's own "+1 Lap" DNF is now inside its window
+    assert ver.iloc[1]["dnf_last"] >= 1
 
 
 def _make_results_3races():
@@ -111,9 +124,10 @@ def test_create_historical_features_as_of_round_filters():
     results = _make_results_3races()
     out = create_historical_features(results, n_previous=6, as_of_round=2)
     ver = out[out["Driver"] == "VER"]
-    # only races 1 and 2 survive the cutoff -> last row's rolling mean = mean(2, 4)
+    # only races 1 and 2 survive the cutoff; shift-before-roll => race-2 window
+    # sees race 1 only (Position 2)
     assert len(ver) == 2
-    assert ver.iloc[-1]["avg_position_last"] == pytest.approx(3.0)
+    assert ver.iloc[-1]["avg_position_last"] == pytest.approx(2.0)
     # ROOKIE's only race is round 3 -> dropped entirely
     assert "ROOKIE" not in out["Driver"].values
 

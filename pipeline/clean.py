@@ -82,6 +82,12 @@ def clean_qualifying(df: pd.DataFrame, config: Config | None = None) -> pd.DataF
     grid_size = config.constants.grid_size if config else 20
 
     df = df.copy()
+
+    # Capture "reached Q3" from the RAW (pre-imputation) Q3 column — after the
+    # median-fill below every driver has a Q3 time and the signal is lost.
+    if "Q3" in df.columns:
+        df["q3_reached"] = df["Q3"].notna().astype(int)
+
     for q_col in ["Q1", "Q2", "Q3"]:
         if q_col in df.columns:
             df[q_col] = df.groupby("Race")[q_col].transform(
@@ -105,9 +111,11 @@ def clean_qualifying(df: pd.DataFrame, config: Config | None = None) -> pd.DataF
 def merge_qualifying_into_results(
     results: pd.DataFrame, qualifying: pd.DataFrame
 ) -> pd.DataFrame:
-    quali_features = qualifying[
-        ["Year", "Race", "Driver", "BestQualifyingTime", "GapToPole", "QualifyingPerformance"]
-    ]
+    carry = ["Year", "Race", "Driver", "BestQualifyingTime", "GapToPole",
+             "QualifyingPerformance"]
+    if "q3_reached" in qualifying.columns:
+        carry.append("q3_reached")
+    quali_features = qualifying[carry]
     merged = results.merge(quali_features, on=["Year", "Race", "Driver"], how="left")
     logger.info("Qualifying features merged into results.")
     return merged
