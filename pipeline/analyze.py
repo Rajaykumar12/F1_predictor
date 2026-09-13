@@ -97,7 +97,9 @@ def _assemble_frame(results: pd.DataFrame, config: Config, shift: int) -> pd.Dat
         c for c in names
         if c not in CATEGORICAL and pd.api.types.is_numeric_dtype(processed[c])
     ]
-    keep = list(dict.fromkeys(names + list(ALL_TARGETS) + [RACE_COL, "Driver", "Team"]))
+    keep = list(dict.fromkeys(
+        names + list(ALL_TARGETS) + [RACE_COL, "Driver", "Team", "Year", "race_seq"]
+    ))
     keep = [c for c in keep if c in processed.columns]
     frame = processed[keep].dropna(subset=numeric + ["Position"])
     return frame.reset_index(drop=True)

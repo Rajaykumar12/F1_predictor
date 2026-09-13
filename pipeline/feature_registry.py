@@ -36,7 +36,11 @@ FAMILIES = (
     "reliability",
     "circuit",
     "championship",
+    "history",
+    "raceday",
+    "racewin",
     "context",
+    "circuit_sim",  # C3 — rolling form at similar circuits (street vs non-street)
 )
 
 # Model input columns that are not produced by a family builder — they are raw
@@ -109,6 +113,10 @@ REGISTRY: list[Feature] = [
             "1 if out-qualified the teammate this round — robust head-to-head"),
     Feature("q3_reached", "quali", "numeric", True, "quali",
             "1 if the driver set a Q3 lap — top-10 pace tier"),
+    Feature("grid_penalty", "quali", "numeric", True, "quali",
+            "GridPosition - QualifyingPosition (C1) — captures grid-drop "
+            "penalties and recovery drives GridPosition alone hides; 0 when "
+            "QualifyingPosition wasn't carried through the merge"),
 
     # --- form (per-driver rolling, shift-before-roll) --------------------- #
     Feature("form_avg_finish_s5", "form", "numeric", True, "form",
@@ -157,6 +165,49 @@ REGISTRY: list[Feature] = [
     Feature("driver_points_gap_to_leader_before", "championship", "numeric", True, "championship",
             "leader's cumulative points minus the driver's, *before* this round — "
             "motivation / pressure signal"),
+
+    # --- history (frozen prior-season priors, B4) — causal even at round 1 - #
+    Feature("driver_prior_season_avg_finish", "history", "numeric", True, "history",
+            "driver's mean finishing Position over their ENTIRE prior season — "
+            "known before round 1; median-filled for a rookie / single-season data"),
+    Feature("driver_prior_season_dnf_rate", "history", "numeric", True, "history",
+            "driver's DNF rate over their entire prior season"),
+    Feature("team_prior_season_points_rank", "history", "numeric", True, "history",
+            "team's constructor-points rank (1 = best) in the prior season"),
+    Feature("driver_circuit_avg_finish_prior", "history", "numeric", True, "history",
+            "driver's mean finish at this round number in all STRICTLY earlier "
+            "seasons — round number is a proxy for circuit identity until a real "
+            "EventName map lands (B4 TODO)"),
+    Feature("season_progress_weight", "history", "numeric", True, "history",
+            "min(1, Race/8) — how far into the season; lets the model learn its "
+            "own reliance on priors vs. in-season form instead of a hand-tuned "
+            "blend"),
+
+    # --- raceday (curated pre-race context, data/context.csv, B6) ------ #
+    Feature("context_wet_race_forecast", "raceday", "numeric", True, "raceday",
+            "1 if the pre-race forecast called for a wet race; 0 (neutral) when "
+            "data/context.csv has no row for this race"),
+    Feature("context_team_upgrade", "raceday", "numeric", True, "raceday",
+            "1 if this team brought a curated major upgrade to this round"),
+    Feature("context_rookie", "raceday", "numeric", True, "raceday",
+            "1 if this is the driver's rookie F1 season"),
+
+    # --- racewin (blend of the separately-trained racewin classifier, C2) - #
+    # NOT in the default families_enabled — see build_racewin_features's
+    # docstring: the racewin model's OTHER inputs (driver_win_rate,
+    # team_reliability) are whole-history rates, not as-of-safe, so this
+    # family trades a known leakage risk for whatever signal predict_proba
+    # adds. Opt in deliberately, not for the honest backtest.
+    Feature("racewin_probability", "racewin", "numeric", True, "racewin",
+            "P(win) from the separately-trained racewin classifier "
+            "(pipeline.model_registry); 1/grid_size neutral-fill if that "
+            "model isn't trained. See the family's leakage caveat above."),
+
+    # --- circuit_sim (C3) — rolling form at circuits of the same type ------- #
+    Feature("form_avg_finish_similar_circuit_s5", "circuit_sim", "numeric", True, "circuit_sim",
+            "shift(1) rolling(5) mean finishing Position over prior races at circuits "
+            "sharing the same circuit_is_street flag (C3) — rescues some circuit "
+            "signal within a season and compounds with B4's driver-at-circuit prior"),
 ]
 
 
@@ -218,4 +269,4 @@ def get(name: str) -> Feature:
 
 # Registry schema version — bumped when features are added/removed/renamed so the
 # feature manifest and saved metrics can be matched to the set that produced them.
-REGISTRY_VERSION = "2026.1"
+REGISTRY_VERSION = "2026.4"
