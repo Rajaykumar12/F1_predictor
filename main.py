@@ -235,7 +235,10 @@ def score_race_cmd(round_no, no_fetch, plots):
         round_no = max(unscored)
         click.echo(f"Scoring latest unscored round: {round_no}")
 
-    out = orchestrate.score_race(cfg, round_no, fetch_if_missing=not no_fetch)
+    try:
+        out = orchestrate.score_race(cfg, round_no, fetch_if_missing=not no_fetch)
+    except (FileNotFoundError, RuntimeError) as e:
+        raise click.ClickException(str(e))
     m, card, drift = out["metrics"], out["rolling_scorecard"], out["drift"]
 
     click.echo("\n" + "=" * 60)
