@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import yaml
 
@@ -33,7 +34,7 @@ _DEFAULT_FEATURES = {
 }
 
 _DEFAULT_LOGGING = {"level": "INFO"}
-_DEFAULT_API = {"cors_origins": ["*"], "data_freshness_hours": 48}
+_DEFAULT_API = {"cors_origins": ["*"], "data_freshness_hours": 48, "api_key": None}
 _DEFAULT_FEEDBACK = {
     "enabled": True,
     "window_races": 5,
@@ -104,6 +105,11 @@ class LoggingConfig:
 class ApiConfig:
     cors_origins: List[str]
     data_freshness_hours: int
+    # Shared secret required (via the X-API-Key header) to call the mutating
+    # /pipeline/* endpoints. None (the default) means those endpoints stay
+    # open — set F1_API_KEY (preferred, never committed) or config.yaml's
+    # api.api_key to require it.
+    api_key: Optional[str] = None
 
 
 @dataclass
@@ -248,6 +254,11 @@ def get_config(config_path: Path = _CONFIG_PATH) -> Config:
         logging_cfg = LoggingConfig(**raw_logging)
 
         raw_api = {**_DEFAULT_API, **raw.get("api", {})}
+        # Env var takes precedence so the real key never has to live in a
+        # committed config.yaml.
+        env_api_key = os.environ.get("F1_API_KEY")
+        if env_api_key:
+            raw_api["api_key"] = env_api_key
         api = ApiConfig(**raw_api)
 
         raw_feedback = {**_DEFAULT_FEEDBACK, **raw.get("feedback", {})}

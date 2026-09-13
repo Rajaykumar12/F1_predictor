@@ -77,6 +77,9 @@ api:
   cors_origins:
     - "*"
   data_freshness_hours: 48
+  # api_key: ""            # requires X-API-Key on POST /pipeline/* if set.
+                            # Prefer the F1_API_KEY env var instead of
+                            # committing a real key here — it takes precedence.
 
 feedback:
   enabled: true

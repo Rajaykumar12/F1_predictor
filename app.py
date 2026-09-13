@@ -9,8 +9,10 @@ from datetime import datetime
 from typing import Literal, Optional
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from pipeline import feedback, orchestrate
@@ -38,10 +40,44 @@ DEFAULT_LOOKBACK_RACES = _cfg.pipeline.lookback_races
 MIN_LOOKBACK = _cfg.pipeline.min_lookback
 MAX_LOOKBACK = _cfg.pipeline.max_lookback
 
+OPENAPI_TAGS = [
+    {
+        "name": "prediction",
+        "description": "Race-winner, lap-time, and finishing-order forecasts (the "
+        "read-only ML inference endpoints).",
+    },
+    {
+        "name": "pipeline",
+        "description": "Data/training pipeline stages (fetch, clean, features, train, "
+        "evaluate) run as background jobs, plus job polling. Mutating endpoints here "
+        "require X-API-Key when one is configured — see the F1_API_KEY env var.",
+    },
+    {
+        "name": "feedback",
+        "description": "Saved predictions, their scored results, and the rolling "
+        "drift scorecard.",
+    },
+    {
+        "name": "system",
+        "description": "Health checks and general API navigation.",
+    },
+]
+
 app = FastAPI(
     title="F1 Race Winner Prediction API",
-    description="API for predicting F1 race winners",
+    description=(
+        "A machine learning system for predicting Formula 1 race outcomes. "
+        "Uses XGBoost models (regression, ranking, and classification) trained "
+        "on multi-season FastF1 data, plus a Monte-Carlo simulation layer for "
+        "per-driver win/podium/points probabilities. Covers the full workflow "
+        "— data fetching, training, race-day prediction, and post-race scoring "
+        "— exposed here as the same pipeline code the CLI (`python main.py "
+        "<command>`) uses."
+    ),
     version="1.0.0",
+    contact={"name": "F1_predictor"},
+    license_info={"name": "MIT", "url": "https://opensource.org/licenses/MIT"},
+    openapi_tags=OPENAPI_TAGS,
 )
 
 app.add_middleware(
@@ -50,6 +86,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/", include_in_schema=False, tags=["system"])
+def root():
+    """Redirects to the interactive Swagger docs."""
+    return RedirectResponse(url="/docs")
+
+
+# ---------------------------------------------------------------------------
+# Optional API-key auth for the mutating /pipeline/* endpoints. Disabled
+# (pass-through) unless api.api_key / F1_API_KEY is set — see config_loader.py.
+# ---------------------------------------------------------------------------
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> None:
+    expected = _cfg.api.api_key
+    if not expected:
+        return  # no key configured — auth not enforced
+    if provided != expected:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key.")
 
 
 # _load_pickle is imported from pipeline.model_registry (kept importable as app._load_pickle).
@@ -162,7 +219,12 @@ def list_jobs():
     return list(reversed(list(_jobs.values())))
 
 
-@app.get("/jobs/{job_id}", response_model=JobStatus, tags=["pipeline"])
+@app.get(
+    "/jobs/{job_id}",
+    response_model=JobStatus,
+    tags=["pipeline"],
+    responses={404: {"description": "Job not found."}},
+)
 def get_job(job_id: str):
     """Poll the status of a pipeline job."""
     job = _jobs.get(job_id)
@@ -181,8 +243,40 @@ class RaceInput(BaseModel):
     GapToPole: Optional[float] = Field(default=None, ge=0.0)
     QualifyingPerformance: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "Team": "Ferrari",
+                "Position": 1,
+                "GridPosition": 1,
+                "driver_win_rate": 14.3,
+                "team_reliability": 85.7,
+                "BestQualifyingTime": 78.792,
+                "GapToPole": 0.0,
+                "QualifyingPerformance": 5.0,
+            }
+        }
+    }
 
-@app.post("/predict")
+
+class PredictionOut(BaseModel):
+    will_win: bool
+    win_probability: float
+    confidence: str
+    features_used: int
+    includes_qualifying: bool
+
+
+@app.post(
+    "/predict",
+    response_model=PredictionOut,
+    tags=["prediction"],
+    responses={
+        503: {"description": "Race win model not loaded."},
+        422: {"description": "Input contains missing values."},
+        400: {"description": "Prediction failed."},
+    },
+)
 def predict(race: RaceInput):
     """Predict race winner probability."""
     if win_model is None:
@@ -240,13 +334,45 @@ class LapTimeInput(BaseModel):
     RollingAvgLapTime_5: Optional[float] = None
     LapTimeStd_5: Optional[float] = 0.5
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "Race": "Monaco",
+                "Driver": "HAM",
+                "Team": "Ferrari",
+                "Position": 1,
+                "TireCompound": "MEDIUM",
+                "TireAge": 12,
+                "driver_win_rate": 14.3,
+                "team_reliability": 85.7,
+            }
+        }
+    }
+
+
+class LapTimePredictionOut(BaseModel):
+    predicted_laptime_seconds: float
+    predicted_laptime_formatted: str
+    tire_compound: str
+    tire_age: int
+    tire_wear_pct: float
+    is_fresh_tire: bool
+
 
 _TIRE_COMPOUND_MAP = {"SOFT": 1, "MEDIUM": 2, "HARD": 3, "INTERMEDIATE": 4, "WET": 5}
 _TIRE_LIFE_MAP = {"SOFT": 40, "MEDIUM": 50, "HARD": 60}
 _DEFAULT_LAPTIME = 95.0
 
 
-@app.post("/predict_laptime")
+@app.post(
+    "/predict_laptime",
+    response_model=LapTimePredictionOut,
+    tags=["prediction"],
+    responses={
+        503: {"description": "Lap time model not loaded."},
+        400: {"description": "Prediction failed."},
+    },
+)
 def predict_laptime(lap: LapTimeInput):
     """Predict lap time (auto-computes derived fields if not provided)."""
     if laptime_pipeline is None:
@@ -339,7 +465,16 @@ def _next_round_guess() -> Optional[int]:
         return None
 
 
-@app.get("/predict_next_race", response_model=RacePrediction)
+@app.get(
+    "/predict_next_race",
+    response_model=RacePrediction,
+    tags=["prediction"],
+    responses={
+        503: {"description": "Race position model not loaded."},
+        404: {"description": "Results data not found."},
+        500: {"description": "Prediction error."},
+    },
+)
 def predict_next_race(
     lookback_races: int = Query(
         default=DEFAULT_LOOKBACK_RACES,
@@ -410,7 +545,22 @@ def predict_next_race(
     )
 
 
-@app.get("/health")
+class HealthStatus(BaseModel):
+    status: str
+    timestamp: Optional[str] = None
+    models_loaded: Optional[dict] = None
+    data_available: Optional[dict] = None
+    data_age_hours: Optional[float] = None
+    data_fresh: Optional[bool] = None
+    model_metrics: Optional[dict] = None
+    feedback: Optional[dict] = None
+    config: Optional[dict] = None
+    # Present only on the degraded/error fallback path, when the checks
+    # above couldn't even be computed.
+    error: Optional[str] = None
+
+
+@app.get("/health", response_model=HealthStatus, tags=["system"])
 def health():
     """Health check endpoint with model and data status."""
     try:
@@ -477,15 +627,26 @@ def _feedback_health():
 # via GET /jobs/{job_id}. Replaces the old CLI subcommands.
 # ---------------------------------------------------------------------------
 
-TrainModel = Literal["laptime", "racewin", "position", "all"]
+TrainModel = Literal["laptime", "racewin", "position", "position_ranker", "dnf", "all"]
 
 
 class TrainRequest(BaseModel):
-    model: TrainModel = "all"
+    model: TrainModel = Field(
+        default="all",
+        description=(
+            "Which model to train. 'all' trains the laptime/racewin/position bulk "
+            "set only — 'position_ranker' and 'dnf' are opt-in and must be named "
+            "explicitly."
+        ),
+    )
+
+    model_config = {"json_schema_extra": {"example": {"model": "position"}}}
 
 
 class RaceRoundRequest(BaseModel):
     race: Optional[int] = Field(default=None, description="Race round number. Auto-detects if omitted.")
+
+    model_config = {"json_schema_extra": {"example": {"race": 15}}}
 
 
 def _job_train(model: TrainModel) -> dict:
@@ -517,28 +678,59 @@ def _job_score_race(race: int) -> dict:
     return out
 
 
-@app.post("/pipeline/fetch", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+_PIPELINE_RESPONSES = {409: {"description": "A pipeline job is already in progress."}}
+
+
+@app.post(
+    "/pipeline/fetch",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_fetch():
     """Fetch raw F1 data from the fastf1 API and save raw CSVs. Runs as a background job."""
     job_id = _submit_job("fetch", run_fetch, _cfg)
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/clean", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/clean",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_clean():
     """Clean and preprocess raw CSV data. Runs as a background job."""
     job_id = _submit_job("clean", run_cleaning, _cfg)
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/features", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/features",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_features():
     """Run feature engineering on cleaned data. Runs as a background job."""
     job_id = _submit_job("features", run_feature_engineering, _cfg)
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/train", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/train",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_train(req: TrainRequest):
     """Train ML model(s) and save pipelines to models/. Reloads the API's in-memory
     models automatically once the job succeeds. Runs as a background job."""
@@ -546,21 +738,42 @@ def pipeline_train(req: TrainRequest):
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/fetch-qualifying", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/fetch-qualifying",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_fetch_qualifying(req: RaceRoundRequest):
     """Fetch qualifying results for the next (or given) race. Runs as a background job."""
     job_id = _submit_job("fetch-qualifying", fetch_upcoming_qualifying, _cfg, race_round=req.race)
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/evaluate-laptime", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/evaluate-laptime",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_evaluate_laptime(req: RaceRoundRequest):
     """Compare predicted vs actual lap times for a completed race. Runs as a background job."""
     job_id = _submit_job("evaluate-laptime", _job_evaluate_laptime, req.race)
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/run-all", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/run-all",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_run_all():
     """Run the full pipeline: fetch -> clean -> features -> train -> fetch-qualifying.
     Runs as a single background job."""
@@ -568,14 +781,28 @@ def pipeline_run_all():
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/evaluate-position", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/evaluate-position",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses=_PIPELINE_RESPONSES,
+)
 def pipeline_evaluate_position(req: RaceRoundRequest):
     """Audit the position model's predicted order vs actual for a completed race. Background job."""
     job_id = _submit_job("evaluate-position", _job_evaluate_position, req.race)
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.post("/pipeline/score-race", response_model=JobSubmitted, status_code=202, tags=["pipeline"])
+@app.post(
+    "/pipeline/score-race",
+    response_model=JobSubmitted,
+    status_code=202,
+    tags=["pipeline"],
+    dependencies=[Depends(require_api_key)],
+    responses={**_PIPELINE_RESPONSES, 422: {"description": "Missing required 'race' round number."}},
+)
 def pipeline_score_race(req: RaceRoundRequest):
     """Score a saved prediction (see /predict_next_race?save=true) against the actual
     result, update the feedback loop, and report drift. Background job."""
@@ -588,13 +815,65 @@ def pipeline_score_race(req: RaceRoundRequest):
 # ---------------------------------------------------------------------------
 # Feedback loop — read-only views (synchronous)
 # ---------------------------------------------------------------------------
-@app.get("/predictions", tags=["feedback"])
+class ForecastRecord(BaseModel):
+    pred_rank: int
+    driver: str
+    team: str
+    predicted_position: float
+    raw_predicted_position: Optional[float] = None
+    confidence: float
+    recent_form: dict
+
+
+class PredictionRecord(BaseModel):
+    season: int
+    round: int
+    race_label: str
+    lookback: int
+    as_of_round: Optional[int] = None
+    predicted_at: str
+    model_trained_at: Optional[str] = None
+    model_r2: Optional[float] = None
+    using_real_qualifying: bool
+    bias_applied: Optional[dict] = None
+    forecasts: list[ForecastRecord]
+    # Filled in by /pipeline/score-race once the actual result is known; its
+    # shape comes from orchestrate.score_race and isn't modeled further here.
+    scored: Optional[dict] = None
+
+
+class RollingScorecard(BaseModel):
+    races: int
+    winner_hit_rate: Optional[float] = None
+    podium_overlap_avg: Optional[float] = None
+    top5_avg: Optional[float] = None
+    top10_avg: Optional[float] = None
+    spearman_avg: Optional[float] = None
+    position_mae_avg: Optional[float] = None
+    position_rmse_avg: Optional[float] = None
+    winner_logloss_avg: Optional[float] = None
+    podium_brier_avg: Optional[float] = None
+    points_brier_avg: Optional[float] = None
+
+
+class ScoreHistoryOut(BaseModel):
+    history: list[dict]
+    rolling_scorecard: RollingScorecard
+    drift: dict
+
+
+@app.get("/predictions", response_model=list[PredictionRecord], tags=["feedback"])
 def list_predictions():
     """All saved race predictions for the configured season, newest first."""
     return list(reversed(feedback.list_prediction_logs(_cfg)))
 
 
-@app.get("/predictions/{round_no}", tags=["feedback"])
+@app.get(
+    "/predictions/{round_no}",
+    response_model=PredictionRecord,
+    tags=["feedback"],
+    responses={404: {"description": "No prediction log for that round."}},
+)
 def get_prediction(round_no: int):
     """The saved prediction (and, once scored, the result) for one round."""
     log = feedback.load_prediction_log(_cfg, round_no)
@@ -603,7 +882,7 @@ def get_prediction(round_no: int):
     return log
 
 
-@app.get("/score-history", tags=["feedback"])
+@app.get("/score-history", response_model=ScoreHistoryOut, tags=["feedback"])
 def score_history():
     """Per-race scores plus the rolling drift scorecard."""
     history = feedback.load_history(_cfg.feedback.score_history_path)

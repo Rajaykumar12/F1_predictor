@@ -254,10 +254,27 @@ def test_score_history_empty(monkeypatch, tmp_path):
     assert "rolling_scorecard" in data
 
 
+def _fake_prediction_log(round_no: int) -> dict:
+    return {
+        "season": 2026,
+        "round": round_no,
+        "race_label": f"Round {round_no}",
+        "lookback": 6,
+        "as_of_round": round_no - 1,
+        "predicted_at": "2026-01-01T00:00:00",
+        "model_trained_at": None,
+        "model_r2": None,
+        "using_real_qualifying": False,
+        "bias_applied": None,
+        "forecasts": [],
+        "scored": None,
+    }
+
+
 def test_predictions_endpoint_shape(monkeypatch):
     monkeypatch.setattr(
         app_module.feedback, "list_prediction_logs",
-        lambda cfg: [{"round": 12, "forecasts": []}, {"round": 13, "forecasts": []}],
+        lambda cfg: [_fake_prediction_log(12), _fake_prediction_log(13)],
     )
     data = client.get("/predictions").json()
     assert isinstance(data, list) and data[0]["round"] == 13  # newest first

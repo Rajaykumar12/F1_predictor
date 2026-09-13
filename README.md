@@ -218,6 +218,15 @@ runs at a time (a second `POST` returns `409 Conflict`).
 To switch seasons, change `season:` in `config.yaml` (and `history_start_season:`
 if you also want more/less history) and run `run-all`.
 
+**Securing the mutating endpoints** — all `POST /pipeline/*` routes above accept
+an optional `X-API-Key` header. By default no key is configured and they stay
+open (fine for local/dev use). To require one, set the `F1_API_KEY` environment
+variable (preferred — never commit a real key) or `api.api_key` in
+`config.yaml`; the env var takes precedence. Once set, Swagger UI shows an
+**Authorize** button for these routes, and a request without a matching header
+gets `401 Unauthorized`. Read-only endpoints (`/predict*`, `/health`,
+`/predictions*`, `/score-history`, `/jobs*`) are never gated.
+
 ## How Predictions Work
 
 ### `predict-race` / `GET /predict_next_race`
@@ -391,6 +400,8 @@ logging:
 api:
   cors_origins: ["*"]
   data_freshness_hours: 48       # /health reports "degraded" if data is older than this
+  # api_key: ""                  # requires X-API-Key on POST /pipeline/*; prefer
+                                  # the F1_API_KEY env var instead (it takes precedence)
 
 models:
   laptime:
