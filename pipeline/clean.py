@@ -10,6 +10,44 @@ from pipeline.config_loader import Config, get_config
 logger = logging.getLogger(__name__)
 
 
+# fastf1 3.8's live ``Status`` vocabulary is the canonical output; legacy Ergast
+# strings ("+1 Lap" …) map onto it so both eras compare identically. "Lapped" is
+# a classified finish, not a DNF — that's the bug this map fixes (see A1 in
+# docs/prediction-improvement-plan.md).
+_STATUS_CANON_MAP = {
+    "finished": "Finished",
+    "lapped": "Lapped",
+    "retired": "Retired",
+    "did not start": "Did not start",
+    "disqualified": "Disqualified",
+    # legacy Ergast "+N Lap(s)" statuses are classified finishers, not DNFs
+    **{f"+{n} lap{'s' if n > 1 else ''}": "Lapped" for n in range(1, 10)},
+    # legacy Ergast retirement causes
+    "accident": "Retired", "collision": "Retired", "spun off": "Retired",
+    "engine": "Retired", "gearbox": "Retired", "transmission": "Retired",
+    "hydraulics": "Retired", "suspension": "Retired", "brakes": "Retired",
+    "mechanical": "Retired", "electrical": "Retired", "withdrew": "Retired",
+    "did not qualify": "Did not start", "did not prequalify": "Did not start",
+    "excluded": "Disqualified",
+}
+
+
+def normalize_status(series: pd.Series) -> pd.Series:
+    """Map raw ``Status`` strings (old Ergast or current fastf1 vocabulary) onto
+    the canonical set ``{Finished, Lapped, Retired, Did not start,
+    Disqualified}``. Unrecognized strings fall back to ``"Retired"`` (a DNF) and
+    are logged so the map can be extended."""
+    lowered = series.astype(str).str.strip().str.lower()
+    canon = lowered.map(_STATUS_CANON_MAP)
+    unmapped = sorted(series[canon.isna() & series.notna()].unique())
+    if unmapped:
+        logger.warning(
+            "normalize_status: %d unrecognized Status value(s) treated as 'Retired': %s",
+            len(unmapped), unmapped,
+        )
+    return canon.fillna("Retired")
+
+
 def load_raw_data(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     data_dir = config.paths.data_dir
     laps = pd.read_csv(data_dir / "f1_laps_simple.csv")
@@ -72,6 +110,7 @@ def clean_laps(df: pd.DataFrame, config: Config | None = None) -> pd.DataFrame:
 
 def clean_results(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    df["status_canon"] = normalize_status(df["Status"])
     df["Status"] = df["Status"].astype("category")
     df["Driver"] = df["Driver"].astype("category")
     df["Team"] = df["Team"].astype("category")
@@ -103,6 +142,8 @@ def clean_qualifying(df: pd.DataFrame, config: Config | None = None) -> pd.DataF
         df.loc[mask, "GapToPole"] = df.loc[mask, "BestQualifyingTime"] - pole_time
 
     df["QualifyingPerformance"] = (df["QualifyingPosition"] / grid_size) * 100
+    if "Status" in df.columns:
+        df["status_canon"] = normalize_status(df["Status"])
     df["Driver"] = df["Driver"].astype("category")
     df["Team"] = df["Team"].astype("category")
     return df
@@ -115,6 +156,11 @@ def merge_qualifying_into_results(
              "QualifyingPerformance"]
     if "q3_reached" in qualifying.columns:
         carry.append("q3_reached")
+    if "QualifyingPosition" in qualifying.columns:
+        # C1: GridPosition is already post-penalty; carrying the raw
+        # qualifying rank alongside it lets grid_penalty = GridPosition -
+        # QualifyingPosition capture recovery/grid drives.
+        carry.append("QualifyingPosition")
     quali_features = qualifying[carry]
     merged = results.merge(quali_features, on=["Year", "Race", "Driver"], how="left")
     logger.info("Qualifying features merged into results.")
