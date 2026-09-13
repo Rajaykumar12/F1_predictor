@@ -124,6 +124,9 @@ def score_race(config: Config, race_round: int, *, fetch_if_missing: bool = True
         "spearman": metrics["spearman"],
         "position_mae": metrics["position_mae"],
         "position_rmse": metrics["position_rmse"],
+        "winner_logloss": metrics["winner_logloss"],
+        "podium_brier": metrics["podium_brier"],
+        "points_brier": metrics["points_brier"],
         "n_drivers": metrics["n_drivers"],
     }
     history_plus = history + [record]

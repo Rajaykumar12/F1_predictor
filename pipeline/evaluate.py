@@ -139,7 +139,7 @@ def evaluate_position(config: Config, race_round: int | None = None) -> pd.DataF
     season = config.pipeline.season
 
     results_df = pd.read_csv(data_dir / "f1_results_features.csv")
-    season_df = results_df[results_df["Year"] == season].copy()
+    season_df = results_df[results_df["Year"] == season]
     available_races = sorted(int(r) for r in season_df["Race"].unique())
     if not available_races:
         raise RuntimeError("No results feature data found. Run: python main.py features")
@@ -152,7 +152,11 @@ def evaluate_position(config: Config, race_round: int | None = None) -> pd.DataF
             f"Round {race_round} not in data. Available rounds: {available_races}"
         )
 
-    processed = build_position_features(season_df, config)
+    # Rebuild on the FULL multi-season frame (B2/B4) — a driver's rolling form
+    # and prior-season priors need real history, not just this season's rows —
+    # then narrow to the target round below.
+    processed = build_position_features(results_df, config, season=season)
+    processed = processed[processed["Year"] == season]
     rows = (
         processed[processed["Race"] == race_round]
         .groupby("Driver")
@@ -197,6 +201,8 @@ def evaluate_position(config: Config, race_round: int | None = None) -> pd.DataF
     print(f"  Top-5 / Top-10    : {metrics['top5']}/5   {metrics['top10']}/10")
     print(f"  Spearman          : {metrics['spearman']:.3f}")
     print(f"  Position MAE      : {metrics['position_mae']:.2f}   RMSE {metrics['position_rmse']:.2f}")
+    print(f"  Winner logloss    : {metrics['winner_logloss']:.3f}   Podium Brier {metrics['podium_brier']:.3f}"
+          f"   Points Brier {metrics['points_brier']:.3f}")
     print(f"{'='*65}")
     print("\nPer-Driver (sorted by abs error):")
     print(

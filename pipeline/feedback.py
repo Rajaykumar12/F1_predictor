@@ -28,6 +28,71 @@ def _overlap(a, b) -> int:
     return len(set(a) & set(b))
 
 
+# --------------------------------------------------------------------------- #
+# Sharp-end metrics — winner_logloss / podium_brier
+#
+# Position MAE ~2.2 hides that the model is usually wrong about who's on the
+# podium (see docs/prediction-improvement-plan.md A3). Neither the point
+# forecast nor a calibrated probability model exists yet (that's Phase E's
+# Monte-Carlo simulation), so these read a proxy probability off the
+# continuous predicted position: drivers closer to the front of the predicted
+# order get more win/podium mass, via a softmax / logistic transform scaled by
+# the race's own predicted-position spread. This is NOT a calibrated
+# probability — it exists so a race with a wrong winner scores worse than one
+# with a merely-reordered podium, which MAE and Spearman alone don't capture.
+# --------------------------------------------------------------------------- #
+def _pseudo_rank_probabilities(pred_positions: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    pred_positions = pd.Series(pred_positions).astype(float)
+    spread = pred_positions.std()
+    scale = float(spread) if spread and spread > 1e-6 else 1.0
+
+    z = (pred_positions - pred_positions.mean()) / scale
+    win_score = np.exp(-z)
+    p_win = (win_score / win_score.sum()).to_numpy()
+
+    p_podium = (1.0 / (1.0 + np.exp((pred_positions.to_numpy() - 3.5) / scale)))
+    p_points = (1.0 / (1.0 + np.exp((pred_positions.to_numpy() - 10.5) / scale)))
+    return p_win, p_podium, p_points
+
+
+def _winner_logloss(p_win: np.ndarray, actual_positions: pd.Series, eps: float = 1e-9) -> float:
+    actual_positions = pd.Series(actual_positions).astype(float)
+    winner_mask = (actual_positions == actual_positions.min()).to_numpy()
+    if not winner_mask.any():
+        return float("nan")
+    p = float(np.asarray(p_win)[winner_mask].sum())
+    return float(-np.log(np.clip(p, eps, 1.0)))
+
+
+def _brier(p: np.ndarray, actual_positions: pd.Series, threshold: float) -> float:
+    actual = (pd.Series(actual_positions).astype(float) <= threshold).astype(float).to_numpy()
+    return float(np.mean((np.asarray(p) - actual) ** 2))
+
+
+def sharp_end_metrics_by_race(
+    pred_positions, actual_positions, race
+) -> dict:
+    """Average ``winner_logloss`` / ``podium_brier`` / ``points_brier`` across
+    races — the metric ``pipeline/train.py``'s forward-chain holdout and
+    ``scripts/rolling_backtest.py`` report alongside MAE."""
+    df = pd.DataFrame({
+        "pred": np.asarray(pred_positions, dtype=float),
+        "actual": np.asarray(actual_positions, dtype=float),
+        "race": np.asarray(race),
+    })
+    logloss, podium_brier, points_brier = [], [], []
+    for _, g in df.groupby("race"):
+        p_win, p_podium, p_points = _pseudo_rank_probabilities(g["pred"])
+        logloss.append(_winner_logloss(p_win, g["actual"]))
+        podium_brier.append(_brier(p_podium, g["actual"], 3))
+        points_brier.append(_brier(p_points, g["actual"], 10))
+    return {
+        "winner_logloss": float(np.nanmean(logloss)) if logloss else float("nan"),
+        "podium_brier": float(np.nanmean(podium_brier)) if podium_brier else float("nan"),
+        "points_brier": float(np.nanmean(points_brier)) if points_brier else float("nan"),
+    }
+
+
 def score_prediction(pred_df: pd.DataFrame, actual_df: pd.DataFrame) -> dict:
     """Score a predicted finishing order against the actual result.
 
@@ -64,6 +129,14 @@ def score_prediction(pred_df: pd.DataFrame, actual_df: pd.DataFrame) -> dict:
 
     unmatched = sorted(set(pred_df["Driver"]) - set(actual_order["Driver"]))
 
+    if len(merged) >= 1:
+        p_win, p_podium, p_points = _pseudo_rank_probabilities(merged["PredictedPosition"])
+        winner_logloss = _winner_logloss(p_win, merged["Position"])
+        podium_brier = _brier(p_podium, merged["Position"], 3)
+        points_brier = _brier(p_points, merged["Position"], 10)
+    else:
+        winner_logloss = podium_brier = points_brier = float("nan")
+
     return {
         "winner_correct": winner_correct,
         "podium_overlap": podium_overlap,
@@ -73,6 +146,9 @@ def score_prediction(pred_df: pd.DataFrame, actual_df: pd.DataFrame) -> dict:
         "spearman": rho,
         "position_mae": mae,
         "position_rmse": rmse,
+        "winner_logloss": winner_logloss,
+        "podium_brier": podium_brier,
+        "points_brier": points_brier,
         "n_drivers": int(len(merged)),
         "unmatched": unmatched,
     }
@@ -210,10 +286,13 @@ def list_prediction_logs(cfg) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Rolling scorecard + drift
 # --------------------------------------------------------------------------- #
-def _nanmean(values) -> float:
-    vals = [v for v in values if v is not None]
+def _nanmean(values) -> float | None:
+    """Mean of the non-None values, skipping NaNs too. ``None`` (not NaN) when
+    nothing is left — NaN isn't valid JSON and every one of these fields is
+    exposed verbatim over the API (``/health``, ``/score-history``)."""
+    vals = [v for v in values if v is not None and not (isinstance(v, float) and np.isnan(v))]
     if not vals:
-        return float("nan")
+        return None
     return float(np.nanmean(vals))
 
 
@@ -230,6 +309,9 @@ def rolling_scorecard(history: list[dict], window: int) -> dict:
         "spearman_avg": _nanmean([r.get("spearman") for r in recent]),
         "position_mae_avg": _nanmean([r.get("position_mae") for r in recent]),
         "position_rmse_avg": _nanmean([r.get("position_rmse") for r in recent]),
+        "winner_logloss_avg": _nanmean([r.get("winner_logloss") for r in recent]),
+        "podium_brier_avg": _nanmean([r.get("podium_brier") for r in recent]),
+        "points_brier_avg": _nanmean([r.get("points_brier") for r in recent]),
     }
 
 

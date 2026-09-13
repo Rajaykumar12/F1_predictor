@@ -274,6 +274,12 @@ def test_predict_next_race_parity():
     r = client.get("/predict_next_race?lookback_races=6")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"predictions", "prediction_date", "next_race", "model_r2"}
+    # E3 added simulation_n_trials to the top-level response
+    expected_keys = {"predictions", "prediction_date", "next_race", "model_r2", "simulation_n_trials"}
+    assert set(body) == expected_keys, f"Unexpected keys: {set(body) ^ expected_keys}"
     assert body["predictions"]
     assert re.search(r" — (real qualifying|historical grid positions), last 6 races form$", body["next_race"])
+    # E3 — each driver prediction should carry probability fields (may be None if DNF model absent)
+    first = body["predictions"][0]
+    prob_fields = {"win_probability", "podium_probability", "points_probability", "p10", "p90", "dnf_probability"}
+    assert prob_fields.issubset(first), f"Missing probability fields: {prob_fields - set(first)}"

@@ -11,13 +11,17 @@ from pipeline.config_loader import get_config
 from pipeline.features import (
     build_championship_features,
     build_circuit_features,
+    build_form_features,
+    build_history_features,
     build_position_features,
     build_quali_features,
     build_racecraft_features,
     build_reliability_features,
     build_team_features,
+    compute_race_seq,
     create_historical_features,
     feature_manifest,
+    regulation_era,
 )
 
 _STATUSES = ["Finished", "+1 Lap"]
@@ -174,3 +178,162 @@ def test_disabling_a_family_removes_its_columns(cfg, monkeypatch):
     assert "circuit_overtaking_index" not in df.columns
     assert "driver_points_gap_to_leader_before" not in df.columns
     assert "quali_gap_to_pole_pct" in df.columns
+
+
+# --------------------------------------------------------------------------- #
+# B2 — cross-season ordering (race_seq)
+# --------------------------------------------------------------------------- #
+def _multi_season(n_races=4, years=(2024, 2025), drivers=("VER", "HAM"), seed=0):
+    """Two mini seasons with the SAME round numbers each year — the exact
+    shape that breaks any builder still grouping/sorting by 'Race' alone."""
+    rng = np.random.default_rng(seed)
+    teams = {"VER": "RB", "HAM": "Merc"}
+    rows = []
+    for year in years:
+        for r in range(1, n_races + 1):
+            order = rng.permutation(len(drivers)) + 1
+            for d, pos in zip(drivers, order):
+                rows.append({
+                    "Year": year, "Race": r, "Driver": d, "Team": teams[d],
+                    "Position": int(pos), "GridPosition": int(pos),
+                    "Points": max(0, len(drivers) - pos) * 5,
+                    "Status": "Finished",
+                    "BestQualifyingTime": 78.0 + pos + rng.normal(0, 0.05),
+                })
+    df = pd.DataFrame(rows)
+    df["GapToPole"] = df["BestQualifyingTime"] - df.groupby(["Year", "Race"])["BestQualifyingTime"].transform("min")
+    return df
+
+
+def test_race_seq_is_monotonic_across_seasons():
+    df = _multi_season(n_races=3, years=(2024, 2025))
+    df["race_seq"] = compute_race_seq(df)
+    # every 2024 row's race_seq must be < every 2025 row's race_seq
+    assert df.loc[df["Year"] == 2024, "race_seq"].max() < df.loc[df["Year"] == 2025, "race_seq"].min()
+    # dense-ranked: 2 years x 3 rounds -> 6 distinct race_seq values
+    assert sorted(df["race_seq"].unique()) == [1, 2, 3, 4, 5, 6]
+
+
+def test_create_historical_features_does_not_leak_across_same_round_number(cfg):
+    """Round 1 of 2025 must never see round 1 of 2024 as 'the same race' —
+    the historical bug this class of test guards against."""
+    df = _multi_season(n_races=4, years=(2024, 2025))
+    out = create_historical_features(df, n_previous=6, completed_statuses=["Finished"])
+    # round 1 of the SECOND season has real prior history (round 2-4 of 2024)
+    r1_2025 = out[(out["Year"] == 2025) & (out["Race"] == 1)]
+    assert r1_2025["avg_position_last"].notna().all()
+    # round 1 of the FIRST season has none
+    r1_2024 = out[(out["Year"] == 2024) & (out["Race"] == 1)]
+    assert r1_2024["avg_position_last"].isna().all()
+
+
+def test_championship_gap_resets_each_season(cfg):
+    df = _multi_season(n_races=4, years=(2024, 2025))
+    out = build_championship_features(df, cfg)
+    r1_2025 = out[(out["Year"] == 2025) & (out["Race"] == 1)]
+    # round 1 of a new season -> no points banked yet by anyone -> gap is 0
+    assert (r1_2025["driver_points_gap_to_leader_before"] == 0).all()
+
+
+def test_reliability_todate_resets_each_season(cfg):
+    df = _multi_season(n_races=4, years=(2024, 2025))
+    out = build_reliability_features(df, cfg)
+    r1_2025 = out[(out["Year"] == 2025) & (out["Race"] == 1)]
+    # first race of a new season -> no prior-season tally carried in -> NaN
+    assert r1_2025["driver_dnf_rate_todate"].isna().all()
+
+
+def test_as_of_round_resolves_within_the_latest_season(cfg):
+    df = _multi_season(n_races=4, years=(2024, 2025))
+    out = create_historical_features(
+        df, n_previous=6, completed_statuses=["Finished"], as_of_round=2,
+    )
+    # as_of_round defaults to the LATEST season present (2025) — so 2025
+    # rounds 3-4 must be excluded, but all of 2024 stays (it's strictly earlier)
+    assert set(out.loc[out["Year"] == 2025, "Race"]) <= {1, 2}
+    assert set(out.loc[out["Year"] == 2024, "Race"]) == {1, 2, 3, 4}
+
+
+# --------------------------------------------------------------------------- #
+# regulation-era boundary — team/driver "form" must not cross a technical
+# regulation reset, but MUST still bridge an ordinary same-era season change
+# --------------------------------------------------------------------------- #
+def test_regulation_era_buckets_years_correctly():
+    resets = [2022, 2026]
+    assert regulation_era(2022, resets) == 2022
+    assert regulation_era(2023, resets) == 2022
+    assert regulation_era(2025, resets) == 2022
+    assert regulation_era(2026, resets) == 2026
+    assert regulation_era(2030, resets) == 2026
+
+
+def test_team_form_resets_at_regulation_era_boundary(cfg):
+    # 2022 -> 2026 crosses cfg's default regulation_reset_seasons ([2022, 2026])
+    df = _multi_season(n_races=4, years=(2022, 2026))
+    out = build_team_features(df, cfg)
+    r1_2026 = out[(out["Year"] == 2026) & (out["Race"] == 1)]
+    assert r1_2026["team_form_avg_finish_s5"].isna().all(), (
+        "team_form_avg_finish_s5 must be NaN at the first race of a new "
+        "regulation era — it must not carry in the prior era's form"
+    )
+
+
+def test_team_form_still_bridges_a_same_era_season_boundary(cfg):
+    # 2024 -> 2025 is entirely inside the same era (both < 2026) — ordinary
+    # season-spanning form must still work, this is not a blanket per-season reset.
+    df = _multi_season(n_races=4, years=(2024, 2025))
+    out = build_team_features(df, cfg)
+    r1_2025 = out[(out["Year"] == 2025) & (out["Race"] == 1)]
+    assert r1_2025["team_form_avg_finish_s5"].notna().all(), (
+        "team_form_avg_finish_s5 must still bridge an ordinary same-era "
+        "season boundary — only a real regulation reset should break it"
+    )
+
+
+def test_form_features_reset_at_regulation_era_boundary(cfg):
+    df = _multi_season(n_races=4, years=(2022, 2026))
+    out = build_form_features(df, cfg)
+    r1_2026 = out[(out["Year"] == 2026) & (out["Race"] == 1)]
+    assert r1_2026["form_avg_finish_s5"].isna().all()
+    # form_trend's neutral-fill (NaN -> 0.0) happens in build_position_features's
+    # post-processing, not inside build_form_features itself — called standalone
+    # here, it's correctly NaN, same as form_avg_finish_s5.
+    assert r1_2026["form_trend"].isna().all()
+
+
+def test_history_family_prior_season_stays_neutral_across_era_boundary(cfg):
+    """driver_prior_season_avg_finish etc. must NOT draw a "prior" from a
+    different regulation era — 2026 has no valid prior under the default
+    [2022, 2026] reset config, since 2025 is missing AND even if it existed
+    it would be pre-reset data relative to 2026."""
+    df = _multi_season(n_races=4, years=(2022, 2026))
+    out = build_history_features(df, cfg)
+    r1_2026 = out[(out["Year"] == 2026) & (out["Race"] == 1)]
+    # neutral-filled to a constant (config.constants.grid_size / 2), not a
+    # real value derived from 2022
+    assert r1_2026["driver_prior_season_avg_finish"].nunique() == 1
+
+
+def test_history_family_prior_season_activates_across_same_era_years(cfg):
+    """A genuine same-era year-to-year prior (2024 -> 2025, both pre-2026)
+    must produce a real, non-neutral, non-constant value."""
+    df = _multi_season(n_races=4, years=(2024, 2025))
+    out = build_history_features(df, cfg)
+    r1_2025 = out[(out["Year"] == 2025) & (out["Race"] == 1)]
+    # 2 drivers with different 2024 season averages -> at least 2 distinct
+    # non-neutral prior values expected
+    assert r1_2025["driver_prior_season_avg_finish"].nunique() >= 2
+
+
+def test_circuit_calendar_distinguishes_same_round_different_years(cfg):
+    """Round 13 is a different circuit in 2022 (Hungarian GP) than in 2026
+    (Italian GP) — a plain Race==round join must not conflate them."""
+    from pipeline.features import load_circuit_calendar
+
+    df = pd.DataFrame({"Year": [2022, 2026], "Race": [13, 13]})
+    calendar = load_circuit_calendar(cfg, df)
+    keyed = df.merge(calendar, left_on=["Year", "Race"], right_on=["Year", "Round"], how="left")
+    keys = dict(zip(keyed["Year"], keyed["circuit_key"]))
+    assert keys[2022] != keys[2026], (
+        f"round 13 resolved to the same circuit_key in both years: {keys}"
+    )

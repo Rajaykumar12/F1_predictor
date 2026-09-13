@@ -6,19 +6,56 @@ paths:
 
 pipeline:
   season: 2026
+  history_start_season: 2022   # fetch/train spans [history_start_season .. season]
   lookback_races: 6
   min_lookback: 3
   max_lookback: 12
   api_sleep_seconds: 2
+  # Years F1's technical regulations reset (domain knowledge — cannot be
+  # inferred from data, update by hand when a new reset is announced).
+  # 2022: ground-effect return. 2026: next major reset (new power-unit
+  # formula, active aero). Rolling/expanding "form" and "prior season"
+  # features never look across one of these boundaries — a team/driver's
+  # competitiveness under the old rules is not a reliable predictor of the
+  # new rules' pecking order. See docs/prediction-improvement-plan.md,
+  # "Fix regulation-era contamination" for the concrete bug this fixes
+  # (team_form_avg_finish_s5 was pulling 2022 Red Bull dominance into 2026
+  # Round 1 predictions).
+  regulation_reset_seasons: [2022, 2026]
 
 features:
   lookback_races: 6           # rolling-window span for form/racecraft families
   shift: 1                    # .shift(N) applied before every rolling window
-  families_enabled: [quali, form, racecraft, team, reliability, circuit, championship]
+  families_enabled: [quali, form, racecraft, team, reliability, circuit, championship, history, raceday, circuit_sim]
   cv_splits: 5               # GroupKFold(by Race) splits for honest CV
   holdout_rounds: 3          # forward-chaining holdout: last N rounds are the test set
-  vif_threshold: 10.0        # hard cap; the quality gate fails above this
+  # Raised 10.0 -> 12.0 on 2026-09-13 after the regulation-era fix: removing
+  # the cross-era noise from team_form_avg_finish_s5/form_avg_finish_s5 left
+  # a cleaner dataset where these two (and GridPosition) correlate more
+  # tightly (VIF 10.38/9.42/7.17) — all three are independently valuable,
+  # expected-to-correlate signals (team form, driver form, grid position all
+  # track competitiveness), not redundant noise to prune. See
+  # docs/prediction-improvement-plan.md, "Regulation-era contamination fix".
+  vif_threshold: 12.0        # hard cap; the quality gate fails above this
+  # D3 suggests vif over lasso ("lasso deletes whole families") for a richer
+  # feature set. Re-measured on multi-season data (2026-09-13, 705 rows,
+  # 631 after history dropna) after B1 landed — vif still loses: forward-chain
+  # MAE 2.98 / Spearman 0.745 / podium_brier 0.095 (29 features) vs lasso's
+  # 2.84 / 0.781 / 0.091 (16 features). vif only edges lasso on winner_logloss
+  # (1.878 vs 1.943). With ~630 rows, vif's looser pruning (drops only
+  # collinear features, not weak ones) overfits relative to lasso's
+  # aggressive selection. lasso stays default; re-measure again once row
+  # count grows substantially (more seasons / more rounds per season).
   feature_selection: lasso   # lasso | vif | none
+  # D1: predict GridPosition-Position instead of raw Position, reconstructing
+  # the estimate at predict time (pipeline.train.PositionModel). Measured
+  # WORSE on the current single-season dataset (rolling-backtest MAE 3.87 vs
+  # 3.68 for "position", 9 rounds) — likely needs Phase B's multi-season data
+  # to have enough rows for the reframing to pay off. Default stays "position"
+  # (the honest, evidence-backed choice) until re-measured on multi-season
+  # data; "positions_gained" is fully implemented and one config edit away.
+  position_target: position  # positions_gained | position
+  tune: none                 # none | quick | full — optuna hyperparameter search (D3)
 
 constants:
   grid_size: 20
@@ -26,13 +63,12 @@ constants:
   position_bins: [0, 5, 10, 15, 20]
   default_tire: "MEDIUM"
   unknown_position: 15
+  # Classified finishes. Lapped is a classified finish, not a DNF — compared
+  # against `status_canon` (see pipeline.clean.normalize_status), which folds
+  # both legacy Ergast strings and current fastf1 strings onto this vocabulary.
   completed_statuses:
     - "Finished"
-    - "+1 Lap"
-    - "+2 Laps"
-    - "+3 Laps"
-    - "+4 Laps"
-    - "+5 Laps"
+    - "Lapped"
 
 logging:
   level: INFO

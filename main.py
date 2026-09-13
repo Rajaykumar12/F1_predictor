@@ -53,7 +53,7 @@ def features():
 @cli.command()
 @click.option(
     "--model",
-    type=click.Choice(["laptime", "racewin", "position", "all"]),
+    type=click.Choice(["laptime", "racewin", "position", "position_ranker", "dnf", "all"]),
     default="all",
     show_default=True,
     help="Which model(s) to train.",
@@ -110,20 +110,36 @@ def run_all():
 # Race-weekend workflow
 # --------------------------------------------------------------------------- #
 def _print_forecast_table(result, model_r2):
-    header = f"{'#':>2}  {'Driver':<14} {'Team':<16} {'PredPos':>7} {'Conf':>5}  Form"
-    click.echo("\n" + "=" * 78)
+    has_probs = any(f.win_probability is not None for f in result.forecasts)
+    if has_probs:
+        header = f"{'#':>2}  {'Driver':<14} {'Team':<16} {'PredPos':>7} {'P(win)':>7} {'P(pod)':>7} {'P(pts)':>7}  Band"
+    else:
+        header = f"{'#':>2}  {'Driver':<14} {'Team':<16} {'PredPos':>7} {'Conf':>5}  Form"
+    click.echo("\n" + "=" * 82)
     click.echo(f"  {result.next_race}")
-    click.echo("=" * 78)
+    if result.simulation_n_trials:
+        click.echo(f"  Monte-Carlo simulation: {result.simulation_n_trials:,} trials")
+    click.echo("=" * 82)
     click.echo(header)
-    click.echo("-" * 78)
+    click.echo("-" * 82)
     for f in result.forecasts:
-        rf = f.recent_form or {}
-        form = f"avg {rf.get('avg_position', '?')}, {rf.get('wins', 0)}W {rf.get('podiums', 0)}P {rf.get('dnfs', 0)}DNF"
-        click.echo(
-            f"{f.pred_rank:>2}  {f.driver:<14} {str(f.team):<16} "
-            f"{f.predicted_position:>7.2f} {f.confidence:>5.2f}  {form}"
-        )
-    click.echo("=" * 78)
+        if has_probs:
+            band = f"[{f.p10:.0f}–{f.p90:.0f}]" if f.p10 is not None else "-"
+            click.echo(
+                f"{f.pred_rank:>2}  {f.driver:<14} {str(f.team):<16} "
+                f"{f.predicted_position:>7.2f} "
+                f"{f.win_probability*100:>6.1f}% "
+                f"{f.podium_probability*100:>6.1f}% "
+                f"{f.points_probability*100:>6.1f}%  {band}"
+            )
+        else:
+            rf = f.recent_form or {}
+            form = f"avg {rf.get('avg_position', '?')}, {rf.get('wins', 0)}W {rf.get('podiums', 0)}P {rf.get('dnfs', 0)}DNF"
+            click.echo(
+                f"{f.pred_rank:>2}  {f.driver:<14} {str(f.team):<16} "
+                f"{f.predicted_position:>7.2f} {f.confidence:>5.2f}  {form}"
+            )
+    click.echo("=" * 82)
     if model_r2 is not None:
         click.echo(f"  model R^2 (stored, optimistic): {model_r2}")
     if result.bias_applied:
@@ -191,6 +207,8 @@ def predict_race_cmd(round_no, lookback, save, apply_bias):
     result = predict_race(
         cfg, bundle.race_model, bundle.metrics,
         lookback=lb, as_of_round=round_no - 1, bias=bias or None,
+        ranker_model=bundle.ranker_model,
+        dnf_model=bundle.dnf_model,
     )
     _print_forecast_table(result, result.model_r2)
 
@@ -228,12 +246,18 @@ def score_race_cmd(round_no, no_fetch, plots):
     click.echo(f"  Top-5 / Top-10   : {m['top5']}/5   {m['top10']}/10")
     click.echo(f"  Spearman         : {m['spearman']:.3f}")
     click.echo(f"  Position MAE     : {m['position_mae']:.2f}   RMSE {m['position_rmse']:.2f}")
+    click.echo(f"  Winner logloss   : {m['winner_logloss']:.3f}   Podium Brier {m['podium_brier']:.3f}"
+               f"   Points Brier {m['points_brier']:.3f}")
     click.echo(f"  Drivers scored   : {m['n_drivers']}")
     click.echo("-" * 60)
+
+    def _fmt2(v):
+        return "n/a" if v is None else f"{v:.2f}"
+
     click.echo(f"  Rolling ({card.get('races', 0)} races): "
-               f"winner {card.get('winner_hit_rate', float('nan')):.2f}, "
-               f"MAE {card.get('position_mae_avg', float('nan')):.2f}, "
-               f"Spearman {card.get('spearman_avg', float('nan')):.2f}")
+               f"winner {_fmt2(card.get('winner_hit_rate'))}, "
+               f"MAE {_fmt2(card.get('position_mae_avg'))}, "
+               f"Spearman {_fmt2(card.get('spearman_avg'))}")
     if drift["retrain_recommended"]:
         click.echo("  DRIFT: retrain recommended —")
         for r in drift["reasons"]:

@@ -25,6 +25,11 @@ _MODEL_FILES = {
     "laptime": "xgb_laptime_pipeline.pkl",
     "position": "race_prediction_pipeline.pkl",
     "laptime_features": "xgb_laptime_features.pkl",
+    # D2 — opt-in learning-to-rank head, not part of MODEL_NAMES/"all" training;
+    # None when untrained, and predict.py blends it in only when present.
+    "position_ranker": "race_ranking_pipeline.pkl",
+    # E1 — DNF classifier feeding pipeline.simulate's Monte-Carlo simulation.
+    "dnf": "dnf_pipeline.pkl",
 }
 
 
@@ -67,6 +72,8 @@ class ModelBundle:
     laptime_pipeline: object | None = None
     race_model: object | None = None
     laptime_features: object | None = None
+    ranker_model: object | None = None
+    dnf_model: object | None = None
     metrics: dict = field(default_factory=dict)
 
 
@@ -78,5 +85,7 @@ def load_bundle(config: Config) -> ModelBundle:
         laptime_pipeline=_load_pickle(md / _MODEL_FILES["laptime"]),
         race_model=_load_pickle(md / _MODEL_FILES["position"]),
         laptime_features=_load_pickle(md / _MODEL_FILES["laptime_features"]),
+        ranker_model=_load_pickle(md / _MODEL_FILES["position_ranker"]),
+        dnf_model=_load_pickle(md / _MODEL_FILES["dnf"]),
         metrics=load_metrics(config),
     )

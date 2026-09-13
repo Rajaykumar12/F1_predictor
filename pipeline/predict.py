@@ -19,6 +19,7 @@ from pipeline import feature_registry as fr
 from pipeline.config_loader import Config
 from pipeline.features import build_position_features
 from pipeline.model_registry import model_feature_columns
+from pipeline.train import blend_regressor_and_ranker
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,13 @@ class DriverForecast:
     raw_predicted_position: float     # model output before bias-correction
     confidence: float
     recent_form: dict
+    # E3 — Monte-Carlo probabilities (None when simulation is disabled/failed)
+    win_probability: float | None = None
+    podium_probability: float | None = None
+    points_probability: float | None = None
+    p10: float | None = None
+    p90: float | None = None
+    dnf_probability: float | None = None
 
 
 @dataclass
@@ -55,6 +63,7 @@ class PredictionResult:
     prediction_date: str
     next_race: str
     bias_applied: dict[str, float] | None = None
+    simulation_n_trials: int | None = None  # E3
 
 
 def predict_race(
@@ -67,6 +76,10 @@ def predict_race(
     qualifying_path=None,
     as_of_round: int | None = None,
     bias: dict[str, float] | None = None,
+    ranker_model=None,
+    dnf_model=None,
+    simulate: bool = True,
+    n_trials: int = 5000,
 ) -> PredictionResult:
     """Predict the finishing order for the next (or a held-out) race.
 
@@ -87,18 +100,23 @@ def predict_race(
         ) from e
 
     season = config.pipeline.season
-    season_data = f1_results[f1_results["Year"] == season].copy()
-    logger.info("Using %d records from %s season.", len(season_data), season)
+    logger.info("Using %d records spanning %s.", len(f1_results),
+                sorted(f1_results["Year"].unique()) if "Year" in f1_results.columns else season)
 
     # One code path with training: build_position_features assembles the exact
     # leakage-safe registry feature set (create_historical_features + family
-    # builders), honouring the as-of-round cutoff for an honest snapshot.
+    # builders), honouring the as-of-round cutoff for an honest snapshot. The
+    # FULL multi-season frame goes in (B2/B4) — a driver's rolling form and
+    # prior-season priors need real history, not just this season's rows —
+    # and only the candidate-driver selection below narrows to ``season``.
     processed = build_position_features(
-        season_data, config, as_of_round=as_of_round, lookback=lookback
+        f1_results, config, as_of_round=as_of_round, season=season, lookback=lookback
     )
     if processed.empty:
         raise ValueError("No data after processing.")
 
+    if "Year" in processed.columns:
+        processed = processed[processed["Year"] == season]
     latest = processed.groupby("Driver").last().reset_index()
     latest = latest[latest["avg_position_last"].notna()].reset_index(drop=True)
 
@@ -137,6 +155,22 @@ def predict_race(
     available = [f for f in race_features if f in latest.columns]
 
     raw_predictions = race_model.predict(latest[available])
+
+    # D2: blend in the learning-to-rank head when one is trained and loaded.
+    # `latest` is already exactly one race (the target race), so a single
+    # rank-average blend over the whole frame is valid.
+    if ranker_model is not None:
+        try:
+            ranker_features = model_feature_columns(ranker_model)
+            ranker_available = [f for f in ranker_features if f in latest.columns]
+            if len(ranker_available) == len(ranker_features):
+                ranker_scores = ranker_model.predict(latest[ranker_available])
+                raw_predictions = blend_regressor_and_ranker(raw_predictions, ranker_scores)
+            else:
+                missing_r = [f for f in ranker_features if f not in latest.columns]
+                logger.warning("Ranker blend skipped — missing feature(s): %s", missing_r)
+        except Exception as e:  # noqa: BLE001 — blend is best-effort, never fatal
+            logger.warning("Ranker blend failed (%s) — using the regressor alone.", e)
 
     model_r2 = metrics.get("position", {}).get("r2")
     bias = bias or None
@@ -177,6 +211,39 @@ def predict_race(
         except Exception as e:  # noqa: BLE001 — skip a bad row, mirror original
             logger.error("Error processing %s: %s", row.get("Driver", "Unknown"), e)
 
+    # E3 — Monte-Carlo simulation: add P(win), P(podium), P(points), 10-90 band
+    # Build a prediction frame aligned to the forecasts (bias-corrected positions).
+    sim_map: dict[str, dict] = {}
+    if simulate and forecasts:
+        try:
+            from pipeline.simulate import simulate_race_df
+
+            sim_df = pd.DataFrame({
+                "Driver": [f.driver for f in forecasts],
+                "PredictedPosition": [f.predicted_position for f in forecasts],
+                **{c: latest.set_index("Driver").reindex([f.driver for f in forecasts])[c].values
+                   for c in latest.columns if c not in ("Driver", "PredictedPosition")
+                   and c in latest.columns},
+            })
+            sim_results = simulate_race_df(
+                sim_df, metrics=metrics, dnf_model=dnf_model, n_trials=n_trials
+            )
+            sim_map = {row["Driver"]: row for _, row in sim_results.iterrows()}
+            logger.info("Monte-Carlo simulation complete (%d trials, %d drivers).", n_trials, len(sim_map))
+        except Exception as e:  # noqa: BLE001 — simulation failure must not break the prediction
+            logger.warning("Simulation failed (%s) — probabilities will be None.", e)
+
+    # Attach simulation results to the corresponding DriverForecast objects.
+    for f in forecasts:
+        s = sim_map.get(f.driver)
+        if s is not None:
+            f.win_probability = float(s["win_probability"])
+            f.podium_probability = float(s["podium_probability"])
+            f.points_probability = float(s["points_probability"])
+            f.p10 = float(s["p10"])
+            f.p90 = float(s["p90"])
+            f.dnf_probability = float(s["dnf_probability"])
+
     if not forecasts:
         raise ValueError("No valid predictions generated.")
 
@@ -196,4 +263,5 @@ def predict_race(
         prediction_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
         next_race=f"{race_label} — {quali_note}, last {lookback} races form",
         bias_applied=bias,
+        simulation_n_trials=n_trials if (simulate and sim_map) else None,
     )

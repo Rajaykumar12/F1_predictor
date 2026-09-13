@@ -10,6 +10,8 @@ from pipeline.clean import (
     handle_missing_lap_times,
     detect_and_remove_outliers,
     clean_laps,
+    clean_results,
+    normalize_status,
 )
 
 
@@ -38,6 +40,36 @@ def _make_results():
         "Points": [25, 18, 18, 25],
         "Status": ["Finished", "Finished", "+1 Lap", "Finished"],
     })
+
+
+def test_normalize_status_maps_old_and_new_vocabularies():
+    s = pd.Series(["Finished", "Lapped", "Retired", "Did not start",
+                    "+1 Lap", "+2 Laps", "Accident", "Collision"])
+    out = normalize_status(s)
+    assert out.tolist() == [
+        "Finished", "Lapped", "Retired", "Did not start",
+        "Lapped", "Lapped", "Retired", "Retired",
+    ]
+
+
+def test_normalize_status_unmapped_falls_back_to_retired():
+    out = normalize_status(pd.Series(["Some Unknown Status"]))
+    assert out.tolist() == ["Retired"]
+
+
+def test_normalize_status_lapped_is_not_dnf():
+    # A1 regression guard: "Lapped" is a classified finish, not a DNF.
+    assert normalize_status(pd.Series(["Lapped"])).iloc[0] != "Retired"
+
+
+def test_clean_results_writes_status_canon():
+    df = pd.DataFrame({
+        "Driver": ["VER", "HAM"],
+        "Team": ["Red Bull", "Mercedes"],
+        "Status": ["Finished", "+1 Lap"],
+    })
+    out = clean_results(df)
+    assert out["status_canon"].tolist() == ["Finished", "Lapped"]
 
 
 def test_engineer_lap_features_adds_columns():

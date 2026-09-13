@@ -58,6 +58,8 @@ win_model = _b.win_model
 laptime_pipeline = _b.laptime_pipeline
 race_model = _b.race_model
 _laptime_features = _b.laptime_features
+ranker_model = _b.ranker_model
+dnf_model = _b.dnf_model   # E3 — feeds Monte-Carlo simulation in predict_race
 _metrics: dict = _b.metrics
 
 
@@ -68,12 +70,14 @@ def _reload_metrics() -> None:
 
 def _reload_models() -> None:
     """Re-read model pickles + metrics from disk (e.g. after a /pipeline/train job)."""
-    global win_model, laptime_pipeline, race_model, _laptime_features
+    global win_model, laptime_pipeline, race_model, _laptime_features, ranker_model, dnf_model
     b = load_bundle(_cfg)
     win_model = b.win_model
     laptime_pipeline = b.laptime_pipeline
     race_model = b.race_model
     _laptime_features = b.laptime_features
+    ranker_model = b.ranker_model
+    dnf_model = b.dnf_model
     _reload_metrics()
     logger.info("Models reloaded from disk.")
 
@@ -295,6 +299,13 @@ class DriverPrediction(BaseModel):
     team: str
     confidence: float
     recent_form: dict
+    # E3 — Monte-Carlo probabilities (None when simulation unavailable)
+    win_probability: Optional[float] = None
+    podium_probability: Optional[float] = None
+    points_probability: Optional[float] = None
+    p10: Optional[float] = None
+    p90: Optional[float] = None
+    dnf_probability: Optional[float] = None
 
 
 class RacePrediction(BaseModel):
@@ -302,6 +313,7 @@ class RacePrediction(BaseModel):
     prediction_date: str
     next_race: str
     model_r2: Optional[float] = None
+    simulation_n_trials: Optional[int] = None  # E3
 
 
 def _maybe_bias() -> Optional[dict]:
@@ -346,6 +358,8 @@ def predict_next_race(
             _cfg, race_model, _metrics,
             lookback=lookback_races,
             bias=_maybe_bias(),
+            ranker_model=ranker_model,
+            dnf_model=dnf_model,
         )
     except ModelNotLoadedError:
         raise HTTPException(
@@ -380,12 +394,19 @@ def predict_next_race(
                 team=f.team,
                 confidence=f.confidence,
                 recent_form=f.recent_form,
+                win_probability=f.win_probability,
+                podium_probability=f.podium_probability,
+                points_probability=f.points_probability,
+                p10=f.p10,
+                p90=f.p90,
+                dnf_probability=f.dnf_probability,
             )
             for f in result.forecasts
         ],
         prediction_date=result.prediction_date,
         next_race=result.next_race,
         model_r2=result.model_r2,
+        simulation_n_trials=result.simulation_n_trials,
     )
 
 
