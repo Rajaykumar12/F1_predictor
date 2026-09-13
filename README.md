@@ -197,10 +197,12 @@ them automatically each weekend — there is no built-in scheduler.
 
 ### From Swagger UI
 
-Start the server (`python main.py serve`), open `http://localhost:8000/docs`.
-Pipeline stages run as **background jobs** — the `POST` returns a `job_id`; poll
-`GET /jobs/{job_id}` for `queued` → `running` → `success`/`failed`. Only one job
-runs at a time (a second `POST` returns `409 Conflict`).
+Start the server (`python main.py serve`), open `http://localhost:8000` (redirects
+to `/docs`). Routes are grouped under **prediction**, **pipeline**, **feedback**,
+and **system** tags, and the request bodies below are pre-filled as examples in
+"Try it out." Pipeline stages run as **background jobs** — the `POST` returns a
+`job_id`; poll `GET /jobs/{job_id}` for `queued` → `running` → `success`/`failed`.
+Only one job runs at a time (a second `POST` returns `409 Conflict`).
 
 | Endpoint | Body | What it does |
 |---|---|---|
