@@ -335,6 +335,36 @@ def fetch_upcoming_qualifying(config: Config, race_round: int | None = None) -> 
           .to_string(index=False))
 
 
+def fetch_single_race(config: Config, season: int, race_round: int) -> bool:
+    """Fetch and save just one (season, round)'s laps/results/qualifying —
+    the targeted counterpart to :func:`run_fetch`'s full multi-season sweep.
+
+    Used by :func:`pipeline.orchestrate._actual_results` (the ``score-race``
+    path) so checking whether a single round's result is published doesn't
+    require re-walking every season's races (``run_fetch`` with no
+    ``seasons`` argument re-fetches every completed race in
+    ``[history_start_season .. season]`` — fine for the full pipeline, far
+    too slow just to check on one round).
+
+    Returns ``True`` if data was fetched and saved, ``False`` if the round
+    hasn't happened yet per the schedule (no API call made in that case) or
+    the fetch came back empty.
+    """
+    _setup_cache(config)
+    if race_round not in get_completed_race_rounds(season):
+        logger.info(
+            "Season %d round %d hasn't happened yet per the schedule — skipping fetch.",
+            season, race_round,
+        )
+        return False
+    laps, results, qualifying = collect_single_race(season, race_round)
+    if not (laps or results or qualifying):
+        return False
+    save_data(laps, results, qualifying, config, merge=True)
+    logger.info("Fetched and saved season %d round %d.", season, race_round)
+    return True
+
+
 def run_fetch(config: Config | None = None, seasons: list[int] | None = None) -> None:
     """Fetch every completed race across ``seasons`` (default:
     ``[history_start_season .. season]``, B1) and save after EACH season —

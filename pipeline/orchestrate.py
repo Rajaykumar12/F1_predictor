@@ -15,7 +15,7 @@ import pandas as pd
 from pipeline import feedback
 from pipeline.config_loader import Config
 from pipeline.evaluate import evaluate_laptime, evaluate_position
-from pipeline.fetch import fetch_upcoming_qualifying, run_fetch
+from pipeline.fetch import fetch_single_race, fetch_upcoming_qualifying, run_fetch
 from pipeline.clean import run_cleaning
 from pipeline.features import run_feature_engineering
 from pipeline.model_registry import MODEL_NAMES, load_metrics
@@ -84,8 +84,13 @@ def _actual_results(config: Config, race_round: int, fetch_if_missing: bool) -> 
         if not got.empty and got["Position"].notna().any():
             return got
     if fetch_if_missing:
-        logger.info("Season %d round %d results not on disk — running fetch.", season, race_round)
-        run_fetch(config)
+        logger.info(
+            "Season %d round %d results not on disk — fetching that race only "
+            "(not a full re-fetch).", season, race_round,
+        )
+        fetched = fetch_single_race(config, season, race_round)
+        if not fetched:
+            return pd.DataFrame(columns=["Driver", "Position"])
         df = pd.read_csv(path)
         return _season_round(df)
     return pd.DataFrame(columns=["Driver", "Position"])
