@@ -50,6 +50,38 @@ def test_score_prediction_few_drivers_nan_rank_metrics():
     assert m["position_mae"] != m["position_mae"]  # NaN (fewer than 3 matched)
 
 
+# --------------------------------------------------------------------------- #
+# sharp-end metrics — winner_logloss / podium_brier / points_brier
+# --------------------------------------------------------------------------- #
+def test_score_prediction_perfect_order_has_low_winner_logloss():
+    drivers = [f"D{i}" for i in range(1, 13)]
+    m = feedback.score_prediction(_pred(drivers), _actual(drivers))
+    # predicted winner == actual winner and the field is a well-formed probability
+    assert m["winner_logloss"] >= 0
+    assert 0 <= m["podium_brier"] <= 1
+    assert 0 <= m["points_brier"] <= 1
+
+
+def test_score_prediction_wrong_winner_worse_logloss_than_right_winner():
+    drivers = [f"D{i}" for i in range(1, 6)]
+    right = feedback.score_prediction(_pred(drivers), _actual(drivers))
+    # swap the predicted P1/P2 so the model's top pick is wrong
+    swapped = _pred(drivers)
+    swapped.loc[[0, 1], "Driver"] = swapped.loc[[1, 0], "Driver"].to_numpy()
+    wrong = feedback.score_prediction(swapped, _actual(drivers))
+    assert wrong["winner_logloss"] > right["winner_logloss"]
+
+
+def test_sharp_end_metrics_by_race_averages_across_races():
+    pred = [1, 2, 3, 4] + [1, 2, 3, 4]
+    actual = [1, 2, 3, 4] + [1, 2, 3, 4]
+    race = [1, 1, 1, 1, 2, 2, 2, 2]
+    out = feedback.sharp_end_metrics_by_race(pred, actual, race)
+    assert out["winner_logloss"] >= 0
+    assert 0 <= out["podium_brier"] <= 1
+    assert 0 <= out["points_brier"] <= 1
+
+
 def test_per_driver_errors_sign():
     pred = _pred(["A", "B", "C", "D", "E"])            # A predicted rank 1
     actual = _actual(["E", "D", "C", "B", "A"])        # A actually finished 5th

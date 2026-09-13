@@ -29,9 +29,12 @@ def test_no_target_derived_or_positionchange_feature():
 
 
 def test_feature_count_in_planned_band():
-    # plan targets 12-18 model features (excluding the 2 categorical context cols)
+    # docs/feature-engineering-redesign-plan.md's original band was 12-18. Phases
+    # B/C of docs/prediction-improvement-plan.md deliberately grew the registry
+    # (history, raceday, racewin families) — widen, not remove, the sanity check:
+    # this still catches an accidental registry explosion, just at the new scale.
     non_context = [f for f in fr.REGISTRY if f.family != "context"]
-    assert 12 <= len(non_context) <= 18
+    assert 12 <= len(non_context) <= 35
 
 
 def test_all_registered_features_are_as_of_safe_by_default():

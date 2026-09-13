@@ -116,3 +116,65 @@ def test_forward_chain_holdout_is_sane_and_reported():
     assert 1.0 < fc < 6.0, m                     # better than random (~7), not leaky-perfect
     assert "documented_baseline" in m
     assert m["registry_version"] == fr.REGISTRY_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# F — race_seq ordering and season-reset feature property tests
+# --------------------------------------------------------------------------- #
+@skip_no_data
+def test_race_seq_ordering_never_leaks_future(frames, cfg):
+    """race_seq must be a monotone dense-rank of (Year, Race) and, with shift=1,
+    every form feature on round R must only aggregate rounds < R.
+    """
+    _raw, clean = frames
+    assert "race_seq" in clean.columns, "race_seq missing from feature frame"
+
+    # race_seq must be monotone in (Year, Race) order
+    order = (
+        clean.drop_duplicates(["Year", "Race", "race_seq"])
+        .sort_values(["Year", "Race"])
+    )
+    seqs = order["race_seq"].tolist()
+    assert seqs == sorted(seqs), \
+        "race_seq is NOT monotone with (Year, Race): ordering is broken"
+
+    # With shift >= 1, avg_position_last on round R may not equal the mean
+    # of Position from the *same or future* rounds for any driver.
+    if "avg_position_last" not in clean.columns:
+        return
+    for driver, g in clean.groupby("Driver", sort=False):
+        g = g.sort_values("race_seq")
+        for _, row in g.iterrows():
+            s = int(row["race_seq"])
+            val = row["avg_position_last"]
+            if pd.isna(val):
+                continue
+            # positions from this round onward — none of these should be in val
+            future = g[g["race_seq"] >= s]["Position"]
+            if len(future) > 1:
+                future_mean = float(future.mean())
+                assert not np.isclose(val, future_mean, atol=0.01), \
+                    (f"Possible future-leakage for {driver} at seq={s}: "
+                     f"avg_position_last={val:.2f} ≈ future mean {future_mean:.2f}")
+
+
+@skip_no_data
+def test_season_reset_features_are_zero_at_round_1(frames, cfg):
+    """Season-start rows (Race == 1 for each Year) must not carry over accumulated
+    stats from the previous season — those to-date totals should be NaN or 0.
+    """
+    _raw, clean = frames
+    season_starts = clean[clean["Race"] == 1]
+    if season_starts.empty:
+        return
+
+    for col in ("driver_dnf_rate_todate", "driver_points_gap_to_leader_before"):
+        if col not in clean.columns:
+            continue
+        non_zero = season_starts[
+            season_starts[col].notna() & (season_starts[col] != 0.0)
+        ]
+        assert non_zero.empty, (
+            f"Season-reset feature '{col}' has non-zero/non-NaN values at Race=1:\n"
+            + non_zero[["Year", "Race", "Driver", col]].to_string()
+        )

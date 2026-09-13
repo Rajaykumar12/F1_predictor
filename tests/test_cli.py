@@ -43,6 +43,12 @@ class _F:
     raw_predicted_position: float
     confidence: float
     recent_form: dict
+    win_probability: float = None
+    podium_probability: float = None
+    points_probability: float = None
+    p10: float = None
+    p90: float = None
+    dnf_probability: float = None
 
 
 @dataclass
@@ -56,6 +62,7 @@ class _Result:
     prediction_date: str = "2026-09-19 15:00"
     next_race: str = "Testonia Grand Prix — real qualifying, last 6 races form"
     bias_applied: dict = None
+    simulation_n_trials: int = None
 
 
 def _fake_bundle():
@@ -63,6 +70,8 @@ def _fake_bundle():
     class B:
         race_model: object
         metrics: dict
+        ranker_model: object = None
+        dnf_model: object = None
     return B(race_model=object(), metrics={"position": {"r2": 0.5}})
 
 
@@ -106,7 +115,8 @@ def test_cli_score_race_scorecard(runner, monkeypatch):
         "race_round": 13,
         "metrics": {"winner_correct": False, "podium_overlap": 1, "podium_exact": 1,
                     "top5": 2, "top10": 7, "spearman": 0.4, "position_mae": 4.6,
-                    "position_rmse": 7.2, "n_drivers": 20},
+                    "position_rmse": 7.2, "winner_logloss": 1.8, "podium_brier": 0.15,
+                    "points_brier": 0.2, "n_drivers": 20},
         "rolling_scorecard": {"races": 3, "winner_hit_rate": 0.33, "position_mae_avg": 4.1, "spearman_avg": 0.5},
         "drift": {"retrain_recommended": True, "reasons": ["rolling position MAE 4.60 > 4.0"], "auto_retrain": False},
     }
