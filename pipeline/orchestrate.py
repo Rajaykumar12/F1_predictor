@@ -65,17 +65,29 @@ def run_all(config: Config) -> dict:
 
 
 def _actual_results(config: Config, race_round: int, fetch_if_missing: bool) -> pd.DataFrame:
+    # Filter on (Year, Race) together, not Race alone — round numbers repeat
+    # across seasons in the multi-season dataset (e.g. both 2022 and 2023 have
+    # a Round 14), so Race-only filtering pools unrelated seasons' results
+    # into one "actual" frame and silently scores against the wrong race.
+    # scripts/backtest.py already does this correctly; this mirrors it.
+    season = config.pipeline.season
+
+    def _season_round(df: pd.DataFrame) -> pd.DataFrame:
+        if "Year" in df.columns:
+            return df[(df["Year"] == season) & (df["Race"] == race_round)]
+        return df[df["Race"] == race_round]  # legacy single-season CSV fallback
+
     path = config.paths.data_dir / "f1_results_simple.csv"
     if path.exists():
         df = pd.read_csv(path)
-        got = df[df["Race"] == race_round]
+        got = _season_round(df)
         if not got.empty and got["Position"].notna().any():
             return got
     if fetch_if_missing:
-        logger.info("Round %d results not on disk — running fetch.", race_round)
+        logger.info("Season %d round %d results not on disk — running fetch.", season, race_round)
         run_fetch(config)
         df = pd.read_csv(path)
-        return df[df["Race"] == race_round]
+        return _season_round(df)
     return pd.DataFrame(columns=["Driver", "Position"])
 
 
