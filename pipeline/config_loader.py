@@ -14,7 +14,7 @@ _DEFAULT_CONSTANTS = {
     "position_bins": [0, 5, 10, 15, 20],
     "default_tire": "MEDIUM",
     "unknown_position": 15,
-    "completed_statuses": ["Finished"],
+    "completed_statuses": ["Finished", "Lapped"],
 }
 
 _DEFAULT_FEATURES = {
@@ -22,11 +22,14 @@ _DEFAULT_FEATURES = {
     "shift": 1,
     "families_enabled": [
         "quali", "form", "racecraft", "team", "reliability", "circuit", "championship",
+        "history", "raceday", "circuit_sim",
     ],
     "cv_splits": 5,
     "holdout_rounds": 3,
     "vif_threshold": 10.0,
     "feature_selection": "lasso",
+    "position_target": "position",
+    "tune": "none",
 }
 
 _DEFAULT_LOGGING = {"level": "INFO"}
@@ -62,6 +65,11 @@ class PipelineConfig:
     min_lookback: int
     max_lookback: int
     api_sleep_seconds: int
+    history_start_season: int = 2022
+    # Years F1's technical regulations reset — see config.yaml's comment.
+    # Sorted ascending; rolling/expanding "form" features never look across
+    # one of these boundaries.
+    regulation_reset_seasons: List[int] = field(default_factory=lambda: [2022, 2026])
 
 
 @dataclass
@@ -83,6 +91,8 @@ class FeaturesConfig:
     holdout_rounds: int
     vif_threshold: float
     feature_selection: str
+    position_target: str = "positions_gained"
+    tune: str = "none"
 
 
 @dataclass
@@ -143,6 +153,18 @@ class Config:
             raise ValueError(f"season must be >= 2018, got {self.pipeline.season}")
         if self.pipeline.lookback_races < 1:
             raise ValueError(f"lookback_races must be >= 1, got {self.pipeline.lookback_races}")
+        if self.pipeline.history_start_season > self.pipeline.season:
+            raise ValueError(
+                "pipeline.history_start_season must be <= pipeline.season, got "
+                f"{self.pipeline.history_start_season} > {self.pipeline.season}"
+            )
+        resets = self.pipeline.regulation_reset_seasons
+        if not resets:
+            raise ValueError("pipeline.regulation_reset_seasons must not be empty")
+        if resets != sorted(resets):
+            raise ValueError(
+                f"pipeline.regulation_reset_seasons must be sorted ascending, got {resets}"
+            )
         if self.constants.grid_size < 10 or self.constants.grid_size > 26:
             raise ValueError(f"grid_size must be 10–26, got {self.constants.grid_size}")
         if not self.constants.completed_statuses:
@@ -180,6 +202,13 @@ class Config:
                 "features.feature_selection must be one of lasso|vif|none, "
                 f"got {ft.feature_selection!r}"
             )
+        if ft.position_target not in ("positions_gained", "position"):
+            raise ValueError(
+                "features.position_target must be one of positions_gained|position, "
+                f"got {ft.position_target!r}"
+            )
+        if ft.tune not in ("none", "quick", "full"):
+            raise ValueError(f"features.tune must be one of none|quick|full, got {ft.tune!r}")
 
 
 def get_config(config_path: Path = _CONFIG_PATH) -> Config:
