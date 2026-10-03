@@ -96,6 +96,19 @@ def test_cli_predict_race_prints_table(runner, monkeypatch):
     assert "Testonia Grand Prix" in result.output
 
 
+def test_cli_predict_race_warns_on_stale_features(runner, monkeypatch):
+    monkeypatch.setattr("pipeline.model_registry.load_bundle", lambda cfg: _fake_bundle())
+    monkeypatch.setattr("pipeline.predict.predict_race", lambda *a, **k: _canned_result())
+    monkeypatch.setattr("pipeline.fetch.fetch_upcoming_qualifying", lambda cfg, race_round=None: None)
+    monkeypatch.setattr("pipeline.orchestrate.compute_bias", lambda cfg: {})
+    monkeypatch.setattr("pipeline.orchestrate.features_staleness", lambda cfg, rnd: f"stale for {rnd}")
+
+    result = runner.invoke(cli, ["predict-race", "--round", "16", "--no-save"])
+    assert result.exit_code == 0, result.output
+    assert "WARNING: stale for 16" in result.output
+    assert "A DRIVER" in result.output  # still predicts
+
+
 def test_cli_predict_race_no_model_errors(runner, monkeypatch):
     @dataclass
     class B:

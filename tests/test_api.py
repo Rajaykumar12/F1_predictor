@@ -292,7 +292,8 @@ def test_predict_next_race_parity():
     assert r.status_code == 200
     body = r.json()
     # E3 added simulation_n_trials to the top-level response
-    expected_keys = {"predictions", "prediction_date", "next_race", "model_r2", "simulation_n_trials"}
+    expected_keys = {"predictions", "prediction_date", "next_race", "model_r2", "simulation_n_trials",
+                     "data_warning"}
     assert set(body) == expected_keys, f"Unexpected keys: {set(body) ^ expected_keys}"
     assert body["predictions"]
     assert re.search(r" — (real qualifying|historical grid positions), last 6 races form$", body["next_race"])

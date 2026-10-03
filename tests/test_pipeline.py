@@ -191,3 +191,36 @@ def test_clean_laps_uses_default_tire(tmp_path):
     laps["TireCompound"] = None  # all nulls
     out = clean_laps(laps)
     assert out["TireCompound"].isna().sum() == 0
+
+
+def test_predict_race_limits_field_to_qualifying_entrants(tmp_path):
+    """A driver with recent form but no grid slot must not be forecast."""
+    from pipeline.config_loader import get_config
+    from pipeline.model_registry import load_bundle
+    from pipeline.predict import predict_race
+
+    cfg = get_config()
+    bundle = load_bundle(cfg)
+    feats = cfg.paths.data_dir / "f1_results_features.csv"
+    if bundle.race_model is None or not feats.exists():
+        pytest.skip("trained position model / feature data not available")
+
+    season_drivers = (
+        pd.read_csv(feats).query("Year == @cfg.pipeline.season")
+        .groupby("Driver")["Race"].max().sort_values().index.tolist()
+    )
+    if len(season_drivers) < 5:
+        pytest.skip("not enough current-season drivers")
+    entrants, left_out = season_drivers[2:], season_drivers[:2]
+    quali = pd.DataFrame({
+        "Year": cfg.pipeline.season, "Race": 99, "RaceName": "Test GP",
+        "Driver": entrants, "GridPosition": range(1, len(entrants) + 1),
+    })
+    q_path = tmp_path / "quali.csv"
+    quali.to_csv(q_path, index=False)
+
+    result = predict_race(cfg, bundle.race_model, bundle.metrics, lookback=6,
+                          qualifying_path=q_path, simulate=False)
+    predicted = {f.driver for f in result.forecasts}
+    assert predicted <= set(entrants)
+    assert not predicted & set(left_out)

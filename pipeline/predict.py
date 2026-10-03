@@ -126,6 +126,21 @@ def predict_race(
     if upcoming_path.exists():
         quali = pd.read_csv(upcoming_path)
         race_label = quali["RaceName"].iloc[0] if "RaceName" in quali.columns else "Next Grand Prix"
+        # The qualifying sheet is the entry list: a driver with recent form but
+        # no grid slot (replaced, injured, swapped seat) must not be simulated
+        # on a stale historical grid. Keep the full frame if nobody matches
+        # (e.g. a name-format mismatch) rather than predicting an empty race.
+        entrants = set(quali["Driver"])
+        not_entered = sorted(set(latest["Driver"]) - entrants)
+        no_history = sorted(entrants - set(latest["Driver"]))
+        if latest["Driver"].isin(entrants).any():
+            if not_entered:
+                logger.info("Dropping driver(s) not in qualifying: %s", not_entered)
+            latest = latest[latest["Driver"].isin(entrants)].reset_index(drop=True)
+        else:
+            logger.warning("No qualifying driver matches the form data — keeping all drivers.")
+        if no_history:
+            logger.warning("Qualifying driver(s) with no %s form data, not predicted: %s", season, no_history)
         for _, q_row in quali.iterrows():
             driver_mask = latest["Driver"] == q_row["Driver"]
             if not driver_mask.any():

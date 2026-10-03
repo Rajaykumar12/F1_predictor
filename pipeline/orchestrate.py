@@ -164,6 +164,33 @@ def score_race(config: Config, race_round: int, *, fetch_if_missing: bool = True
     }
 
 
+def features_staleness(config: Config, target_round: int) -> str | None:
+    """Warning text when the results feature file can't support ``target_round``.
+
+    Predicting round N uses form as of round N-1, but ``f1_results_features.csv``
+    only advances when clean + features are re-run — fetching alone (or the
+    single-race fetch in ``score-race``) doesn't touch it. Offline check: no
+    FastF1 call. Returns ``None`` when the file is current or absent (the
+    predictor reports a missing file itself).
+    """
+    path = config.paths.data_dir / "f1_results_features.csv"
+    if not path.exists():
+        return None
+    season = config.pipeline.season
+    df = pd.read_csv(path, usecols=["Year", "Race"])
+    rounds = df.loc[df["Year"] == season, "Race"]
+    latest = int(rounds.max()) if not rounds.empty else 0
+    needed = int(target_round) - 1
+    if latest >= needed:
+        return None
+    missing = f"round {needed}" if latest + 1 == needed else f"rounds {latest + 1}-{needed}"
+    return (
+        f"Feature data covers {season} only through round {latest}; round {target_round} "
+        f"needs form through round {needed} ({missing} missing). Refresh with: "
+        "python main.py fetch && python main.py clean && python main.py features"
+    )
+
+
 def compute_bias(config: Config) -> dict:
     fb = config.feedback
     if not fb.bias_correction_enabled:

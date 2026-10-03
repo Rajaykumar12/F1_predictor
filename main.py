@@ -201,6 +201,10 @@ def predict_race_cmd(round_no, lookback, save, apply_bias):
             "position model not trained — run: python main.py train --model position"
         )
 
+    stale = orchestrate.features_staleness(cfg, round_no)
+    if stale:
+        click.secho(f"WARNING: {stale}", fg="yellow", err=True)
+
     use_bias = cfg.feedback.bias_correction_enabled if apply_bias is None else apply_bias
     bias = orchestrate.compute_bias(cfg) if use_bias else {}
 

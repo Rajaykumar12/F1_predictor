@@ -247,3 +247,35 @@ def test_prediction_log_roundtrip(tmp_path):
 
     logs = feedback.list_prediction_logs(cfg)
     assert len(logs) == 1 and logs[0]["round"] == 14
+
+
+def _write_features(cfg, rows):
+    cfg.paths.data_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=["Year", "Race"]).to_csv(
+        cfg.paths.data_dir / "f1_results_features.csv", index=False
+    )
+
+
+def test_features_staleness_current_is_none(tmp_path):
+    from pipeline import orchestrate
+    cfg = _tmp_config(tmp_path)
+    _write_features(cfg, [(2026, r) for r in range(1, 16)])
+    assert orchestrate.features_staleness(cfg, 16) is None
+
+
+def test_features_staleness_reports_missing_rounds(tmp_path):
+    from pipeline import orchestrate
+    cfg = _tmp_config(tmp_path)
+    # Older season reaching a higher round must not mask the 2026 gap.
+    _write_features(cfg, [(2025, 22)] + [(2026, r) for r in range(1, 14)])
+    msg = orchestrate.features_staleness(cfg, 16)
+    assert msg is not None
+    assert "through round 13" in msg and "rounds 14-15 missing" in msg
+
+
+def test_features_staleness_single_round_and_missing_file(tmp_path):
+    from pipeline import orchestrate
+    cfg = _tmp_config(tmp_path)
+    assert orchestrate.features_staleness(cfg, 16) is None  # no file: predictor reports it
+    _write_features(cfg, [(2026, r) for r in range(1, 15)])
+    assert "(round 15 missing)" in orchestrate.features_staleness(cfg, 16)

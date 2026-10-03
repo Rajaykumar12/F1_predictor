@@ -440,6 +440,7 @@ class RacePrediction(BaseModel):
     next_race: str
     model_r2: Optional[float] = None
     simulation_n_trials: Optional[int] = None  # E3
+    data_warning: Optional[str] = None  # set when feature data lags the predicted round
 
 
 def _maybe_bias() -> Optional[dict]:
@@ -509,9 +510,18 @@ def predict_next_race(
         logger.error("Error in predict_next_race: %s", e)
         raise HTTPException(status_code=500, detail=f"Prediction error: {e}")
 
+    rnd = _next_round_guess()
+    data_warning = None
+    if rnd is not None:
+        try:
+            data_warning = orchestrate.features_staleness(_cfg, rnd)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("feature staleness check skipped: %s", e)
+    if data_warning:
+        logger.warning("predict_next_race: %s", data_warning)
+
     if save:
         try:
-            rnd = _next_round_guess()
             if rnd is not None:
                 feedback.write_prediction_log(_cfg, result, round_no=rnd)
         except Exception as e:  # noqa: BLE001
@@ -542,6 +552,7 @@ def predict_next_race(
         next_race=result.next_race,
         model_r2=result.model_r2,
         simulation_n_trials=result.simulation_n_trials,
+        data_warning=data_warning,
     )
 
 
