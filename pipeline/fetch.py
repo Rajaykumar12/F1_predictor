@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import fastf1
 import pandas as pd
@@ -114,12 +114,34 @@ def collect_single_race(
         return [], [], []
 
 
+# A Grand Prix runs ~2h (red flags can push it to the 3h cap); results are
+# treated as available once this much time has passed since lights out.
+RACE_FINISH_BUFFER = timedelta(hours=3)
+
+
+def _completed_rounds(schedule: pd.DataFrame, now_utc: datetime) -> list[int]:
+    """Rounds whose race has finished as of ``now_utc`` (naive UTC).
+
+    Uses the Race session's UTC start time so a race counts as done on race
+    day itself, not only from the next calendar day. Falls back to
+    ``EventDate < today`` for rows with no Race session time.
+    """
+    race_start = pd.Series(pd.NaT, index=schedule.index, dtype="datetime64[ns]")
+    for i in range(1, 6):
+        name_col, date_col = f"Session{i}", f"Session{i}DateUtc"
+        if name_col in schedule.columns and date_col in schedule.columns:
+            is_race = schedule[name_col] == "Race"
+            race_start = race_start.where(~is_race, pd.to_datetime(schedule[date_col]))
+    by_time = race_start.notna() & (race_start + RACE_FINISH_BUFFER <= now_utc)
+    by_date = race_start.isna() & (schedule["EventDate"].dt.date < now_utc.date())
+    return schedule.loc[by_time | by_date, "RoundNumber"].astype(int).tolist()
+
+
 def get_completed_race_rounds(season: int) -> list[int]:
     """Return round numbers for races that have already taken place."""
     schedule = fastf1.get_event_schedule(season, include_testing=False)
-    today = date.today()
-    completed = schedule[schedule["EventDate"].dt.date < today]
-    rounds = completed["RoundNumber"].tolist()
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    rounds = _completed_rounds(schedule, now_utc)
     logger.info(
         "%d of %d rounds completed so far in %s season.",
         len(rounds), len(schedule), season,

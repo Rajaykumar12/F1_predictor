@@ -112,14 +112,32 @@ Or all four in one go:
 python main.py run-all                      # fetch -> clean -> features -> train -> fetch-qualifying
 ```
 
-Race weekend, once data/models above already exist:
+Race weekend, once data/models above already exist (`N` = this weekend's round):
 
 ```bash
-python main.py fetch-qualifying             # auto-detects the next upcoming round
-python main.py predict-race                 # prints ranked finishing order + P(win)/P(pod)/P(pts)/band
-python main.py predict-race --save          # same, and logs it to data/predictions/ for later scoring
-python main.py score-race                   # after the race: scores the saved prediction, updates drift/bias
+# Saturday — after qualifying
+python main.py fetch-qualifying --race N    # real grid -> data/upcoming_qualifying.csv (omit --race to auto-detect)
+
+# Sunday — before the race
+python main.py predict-race --round N --save   # ranked order + P(win)/P(pod)/P(pts)/band, logged to data/predictions/
+
+# Sunday — after the race (from ~3h after lights out)
+python main.py score-race --round N         # fetches round N's result, scores the saved prediction, updates drift/bias
+python main.py clean                        # fold round N into the cleaned data ...
+python main.py features                     # ... and into the feature file predict-race reads
+python main.py train --model position       # optional — e.g. every few races, or when score-race flags drift
 ```
+
+The last three steps matter: `score-race` only appends round `N` to the raw `f1_results_simple.csv`, while `predict-race` reads `f1_results_features.csv`. Skip them and next weekend's forecast runs on form one race out of date — `predict-race` prints a yellow `WARNING: Feature data covers ... only through round X` when that happens. A forecast only includes drivers on the qualifying sheet; anyone with recent form but no grid slot is dropped (and logged).
+
+If you didn't save a prediction for a round (so there's nothing to score), still bring its result in before the next weekend:
+
+```bash
+python -c "from pipeline.config_loader import get_config; from pipeline.fetch import fetch_single_race; print(fetch_single_race(get_config(), 2026, N))"
+python main.py clean && python main.py features
+```
+
+(`python main.py fetch` also works but re-downloads every season and can hit FastF1's hourly rate limit partway through — if it stops with a traceback, don't run `clean`/`features` until it has finished.)
 
 Check the model against a specific already-completed round — see the caveat under **Backtesting** below for which of these two to trust:
 

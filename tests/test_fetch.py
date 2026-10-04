@@ -126,3 +126,32 @@ def test_run_fetch_saves_after_each_season_even_if_a_later_one_fails(tmp_path, m
     # 2023 and 2024 must have been saved even though 2025 blew up
     results = pd.read_csv(tmp_path / "f1_results_simple.csv")
     assert sorted(results["Year"].unique().tolist()) == [2023, 2024]
+
+
+def _schedule():
+    from datetime import datetime as dt
+    return pd.DataFrame({
+        "RoundNumber": [15, 16, 17],
+        "EventDate": pd.to_datetime(["2026-09-26", "2026-10-04", "2026-10-11"]),
+        "Session4": ["Qualifying", "Qualifying", "Sprint"],
+        "Session4DateUtc": [dt(2026, 9, 25, 12), dt(2026, 10, 3, 8), dt(2026, 10, 10, 9)],
+        "Session5": ["Race", "Race", "Race"],
+        "Session5DateUtc": [dt(2026, 9, 26, 11), dt(2026, 10, 4, 7), pd.NaT],
+    })
+
+
+def test_completed_rounds_counts_race_on_race_day_after_finish():
+    from datetime import datetime as dt
+    assert fetch._completed_rounds(_schedule(), dt(2026, 10, 4, 13, 30)) == [15, 16]
+
+
+def test_completed_rounds_excludes_race_still_running():
+    from datetime import datetime as dt
+    # 07:00 UTC lights out + 3h buffer -> not done at 09:30
+    assert fetch._completed_rounds(_schedule(), dt(2026, 10, 4, 9, 30)) == [15]
+
+
+def test_completed_rounds_falls_back_to_event_date_without_race_time():
+    from datetime import datetime as dt
+    assert fetch._completed_rounds(_schedule(), dt(2026, 10, 11, 23)) == [15, 16]
+    assert fetch._completed_rounds(_schedule(), dt(2026, 10, 12, 0, 5)) == [15, 16, 17]
